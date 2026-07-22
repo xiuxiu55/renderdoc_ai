@@ -1,0 +1,550 @@
+"""Frame-analysis tools that operate on the *live* capture loaded in RenderDoc.
+
+Unlike the standalone MCP server (which opens its own .rdc), this runs inside
+qrenderdoc and reads the capture that is currently open in the UI, at the
+currently selected event. All RenderDoc work is marshalled onto the replay
+thread via ``ctx.Replay().BlockInvoke`` as required by the RenderDoc API.
+
+This module is imported inside qrenderdoc (Python 3.6), so it uses only the
+RenderDoc python API and the standard library.
+"""
+
+import json
+
+import renderdoc as rd
+
+STAGES = ["Vertex", "Hull", "Domain", "Geometry", "Pixel", "Compute"]
+STAGE_ABBREV = {
+    "Vertex": "VS", "Hull": "HS", "Domain": "DS",
+    "Geometry": "GS", "Pixel": "PS", "Compute": "CS",
+}
+
+
+def _rid(resid):
+    if resid is None:
+        return None
+    try:
+        if resid == rd.ResourceId.Null():
+            return None
+    except Exception:
+        pass
+    return str(resid)
+
+
+def _enum(value):
+    return str(value)
+
+
+def _stage_enum(name):
+    try:
+        return getattr(rd.ShaderStage, name)
+    except AttributeError:
+        raise ValueError("Unknown shader stage '%s'. Valid: %s" % (name, ", ".join(STAGES)))
+
+
+def _resource_names(controller):
+    names = {}
+    for res in controller.GetResources():
+        names[str(res.resourceId)] = res.name
+    return names
+
+
+def _action_name(controller, action):
+    try:
+        return action.GetName(controller.GetStructuredFile())
+    except Exception:
+        return getattr(action, "customName", "") or ""
+
+
+def _action_summary(controller, action):
+    data = {
+        "eventId": int(action.eventId),
+        "actionId": int(getattr(action, "actionId", 0)),
+        "name": _action_name(controller, action),
+        "flags": _enum(action.flags),
+    }
+    flags = action.flags
+    if flags & rd.ActionFlags.Drawcall:
+        data["numIndices"] = int(action.numIndices)
+        data["numInstances"] = int(action.numInstances)
+        data["indexOffset"] = int(action.indexOffset)
+        data["baseVertex"] = int(action.baseVertex)
+        data["vertexOffset"] = int(action.vertexOffset)
+        data["instanceOffset"] = int(action.instanceOffset)
+    if flags & rd.ActionFlags.Dispatch:
+        data["dispatchDimension"] = [int(x) for x in action.dispatchDimension]
+    outputs = [_rid(o) for o in getattr(action, "outputs", [])]
+    outputs = [o for o in outputs if o]
+    if outputs:
+        data["outputs"] = outputs
+    depth = _rid(getattr(action, "depthOut", None))
+    if depth:
+        data["depthOutput"] = depth
+    return data
+
+
+def _build_action_map(controller):
+    mapping = {}
+
+    def walk(actions):
+        for a in actions:
+            mapping[int(a.eventId)] = a
+            if a.children:
+                walk(a.children)
+
+    walk(controller.GetRootActions())
+    return mapping
+
+
+def _pipeline_summary(controller):
+    state = controller.GetPipelineState()
+    names = _resource_names(controller)
+
+    def named(resid):
+        rid = _rid(resid)
+        if rid is None:
+            return None
+        return {"id": rid, "name": names.get(rid, "")}
+
+    result = {"topology": _enum(state.GetPrimitiveTopology())}
+
+    shaders = {}
+    for name in STAGES:
+        stage = _stage_enum(name)
+        info = named(state.GetShader(stage))
+        if info is None:
+            continue
+        info["entryPoint"] = state.GetShaderEntryPoint(stage)
+        shaders[name] = info
+    result["shaders"] = shaders
+
+    try:
+        targets = []
+        for t in state.GetOutputTargets():
+            info = named(t.resource)
+            if info:
+                targets.append(info)
+        result["colorTargets"] = targets
+    except Exception:
+        pass
+
+    try:
+        depth = named(state.GetDepthTarget().resource)
+        if depth:
+            result["depthTarget"] = depth
+    except Exception:
+        pass
+
+    try:
+        viewports = []
+        for i in range(8):
+            vp = state.GetViewport(i)
+            if vp.width == 0 and vp.height == 0:
+                continue
+            viewports.append({
+                "x": vp.x, "y": vp.y, "width": vp.width, "height": vp.height,
+                "minDepth": vp.minDepth, "maxDepth": vp.maxDepth,
+            })
+        if viewports:
+            result["viewports"] = viewports
+    except Exception:
+        pass
+
+    return result
+
+
+class LiveFrame(object):
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.current_event = 0
+
+    # -- infrastructure ---------------------------------------------------
+
+    def loaded(self):
+        try:
+            return bool(self.ctx.IsCaptureLoaded())
+        except Exception:
+            return False
+
+    def run(self, fn):
+        box = {}
+        err = {}
+
+        def cb(controller):
+            try:
+                box["v"] = fn(controller)
+            except BaseException as exc:  # noqa: BLE001
+                err["e"] = exc
+
+        self.ctx.Replay().BlockInvoke(cb)
+        if "e" in err:
+            raise err["e"]
+        return box.get("v")
+
+    def read_at(self, event_id, fn):
+        cur = int(self.current_event or 0)
+        target = cur if event_id is None else int(event_id)
+
+        def cb(controller):
+            controller.SetFrameEvent(target, False)
+            try:
+                return fn(controller)
+            finally:
+                if event_id is not None and target != cur:
+                    controller.SetFrameEvent(cur, False)
+
+        return self.run(cb)
+
+    def _require_loaded(self):
+        if not self.loaded():
+            raise RuntimeError("No capture is loaded in RenderDoc.")
+
+    # -- tools ------------------------------------------------------------
+
+    def get_current_frame(self, args):
+        self._require_loaded()
+
+        def fn(controller):
+            props = controller.GetAPIProperties()
+            mapping = _build_action_map(controller)
+            action = mapping.get(int(self.current_event))
+            data = {
+                "api": _enum(props.pipelineType),
+                "localRenderer": _enum(props.localRenderer),
+                "currentEvent": int(self.current_event),
+                "totalActions": len(mapping),
+                "action": _action_summary(controller, action) if action else None,
+                "pipeline": _pipeline_summary(controller),
+            }
+            return data
+
+        return json.dumps(self.read_at(None, fn), indent=2)
+
+    def list_actions(self, args):
+        self._require_loaded()
+        drawcalls_only = bool(args.get("drawcalls_only", False))
+        max_depth = int(args.get("max_depth", 0))
+
+        def fn(controller):
+            def is_draw(a):
+                return bool(a.flags & (rd.ActionFlags.Drawcall | rd.ActionFlags.Dispatch))
+
+            def walk(actions, depth):
+                out = []
+                for a in actions:
+                    include = (not drawcalls_only) or is_draw(a)
+                    node = _action_summary(controller, a) if include else None
+                    children = []
+                    if a.children and (max_depth == 0 or depth < max_depth):
+                        children = walk(a.children, depth + 1)
+                    if node is not None:
+                        if children:
+                            node["children"] = children
+                        out.append(node)
+                    else:
+                        out.extend(children)
+                return out
+
+            return walk(controller.GetRootActions(), 1)
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_action(self, args):
+        self._require_loaded()
+        event_id = int(args["event_id"])
+
+        def fn(controller):
+            mapping = _build_action_map(controller)
+            action = mapping.get(event_id)
+            if action is None:
+                raise RuntimeError("No action found for eventId %d." % event_id)
+            data = _action_summary(controller, action)
+            sdfile = controller.GetStructuredFile()
+            events = []
+            for ev in action.events:
+                entry = {"eventId": int(ev.eventId), "chunkIndex": int(ev.chunkIndex)}
+                try:
+                    entry["apiCall"] = sdfile.chunks[ev.chunkIndex].name
+                except Exception:
+                    pass
+                events.append(entry)
+            data["events"] = events
+            return data
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_pipeline_state(self, args):
+        self._require_loaded()
+        event_id = args.get("event_id")
+
+        def fn(controller):
+            summary = _pipeline_summary(controller)
+            summary["eventId"] = int(self.current_event if event_id is None else event_id)
+            return summary
+
+        return json.dumps(self.read_at(event_id, fn), indent=2)
+
+    def get_shader_disassembly(self, args):
+        self._require_loaded()
+        stage_name = args["stage"]
+        event_id = args.get("event_id")
+        target = args.get("target")
+
+        def fn(controller):
+            state = controller.GetPipelineState()
+            stage = _stage_enum(stage_name)
+            refl = state.GetShaderReflection(stage)
+            if refl is None:
+                raise RuntimeError("No shader bound at stage %s." % stage_name)
+            pipe = state.GetGraphicsPipelineObject()
+            targets = controller.GetDisassemblyTargets(True)
+            chosen = target or (targets[0] if targets else "")
+            text = controller.DisassembleShader(pipe, refl, chosen)
+            return {
+                "stage": stage_name,
+                "target": chosen,
+                "availableTargets": list(targets),
+                "disassembly": text,
+            }
+
+        return json.dumps(self.read_at(event_id, fn), indent=2)
+
+    def get_shader_reflection(self, args):
+        self._require_loaded()
+        stage_name = args["stage"]
+        event_id = args.get("event_id")
+
+        def fn(controller):
+            state = controller.GetPipelineState()
+            stage = _stage_enum(stage_name)
+            refl = state.GetShaderReflection(stage)
+            if refl is None:
+                raise RuntimeError("No shader bound at stage %s." % stage_name)
+
+            def sig(s):
+                return {
+                    "name": getattr(s, "varName", "") or getattr(s, "semanticName", ""),
+                    "semantic": getattr(s, "semanticName", ""),
+                    "index": int(getattr(s, "semanticIndex", 0)),
+                    "compType": _enum(getattr(s, "compType", "")),
+                    "components": int(getattr(s, "compCount", 0)),
+                }
+
+            return {
+                "stage": stage_name,
+                "resourceId": _rid(refl.resourceId),
+                "entryPoint": getattr(refl, "entryPoint", ""),
+                "inputs": [sig(s) for s in refl.inputSignature],
+                "outputs": [sig(s) for s in refl.outputSignature],
+                "constantBlocks": [
+                    {"name": cb.name, "byteSize": int(getattr(cb, "byteSize", 0)),
+                     "variableCount": len(cb.variables)}
+                    for cb in refl.constantBlocks
+                ],
+                "readOnlyResources": [{"name": r.name} for r in refl.readOnlyResources],
+                "readWriteResources": [{"name": r.name} for r in refl.readWriteResources],
+                "samplers": [{"name": s.name} for s in refl.samplers],
+            }
+
+        return json.dumps(self.read_at(event_id, fn), indent=2)
+
+    def list_textures(self, args):
+        self._require_loaded()
+        name_filter = (args.get("name_filter") or "").lower()
+
+        def fn(controller):
+            names = _resource_names(controller)
+            out = []
+            for tex in controller.GetTextures():
+                rid = str(tex.resourceId)
+                name = names.get(rid, "")
+                if name_filter and name_filter not in name.lower():
+                    continue
+                fmt = tex.format.Name() if hasattr(tex.format, "Name") else _enum(tex.format)
+                out.append({
+                    "id": rid, "name": name,
+                    "width": int(tex.width), "height": int(tex.height),
+                    "depth": int(tex.depth), "arraySize": int(tex.arraysize),
+                    "mips": int(tex.mips), "format": _enum(fmt),
+                })
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def list_resources(self, args):
+        self._require_loaded()
+        name_filter = (args.get("name_filter") or "").lower()
+
+        def fn(controller):
+            out = []
+            for res in controller.GetResources():
+                if name_filter and name_filter not in res.name.lower():
+                    continue
+                out.append({"id": str(res.resourceId), "name": res.name, "type": _enum(res.type)})
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def list_counters(self, args):
+        self._require_loaded()
+
+        def fn(controller):
+            out = []
+            for c in controller.EnumerateCounters():
+                desc = controller.DescribeCounter(c)
+                out.append({
+                    "counter": _enum(c), "name": desc.name, "description": desc.description,
+                    "unit": _enum(desc.unit), "resultType": _enum(desc.resultType),
+                    "resultByteWidth": int(desc.resultByteWidth),
+                })
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def pick_duration_counter(self, args):
+        """Return the best available GPU duration counter for this capture.
+
+        RenderDoc's enum is ``EventGPUDuration`` (not ``GPUDuration``). Some
+        APIs/drivers expose none; then we report available counters.
+        """
+        self._require_loaded()
+
+        def fn(controller):
+            available = []
+            for c in controller.EnumerateCounters():
+                desc = controller.DescribeCounter(c)
+                available.append({
+                    "counter": _enum(c),
+                    "short": _enum(c).split(".")[-1],
+                    "name": desc.name,
+                    "description": desc.description,
+                    "unit": _enum(desc.unit),
+                })
+            # Prefer EventGPUDuration; accept common aliases / name matches.
+            preferred = ("EventGPUDuration", "GPUDuration", "Duration")
+            chosen = None
+            for short in preferred:
+                for row in available:
+                    if row["short"] == short or short in row["short"] or short in (row["name"] or ""):
+                        chosen = row
+                        break
+                if chosen is not None:
+                    break
+            return {"chosen": chosen, "available": available}
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def fetch_counters(self, args):
+        self._require_loaded()
+        counters = args.get("counters") or []
+        event_ids = args.get("event_ids")
+
+        def fn(controller):
+            available = list(controller.EnumerateCounters())
+            avail_by_short = {}
+            for c in available:
+                short = _enum(c).split(".")[-1]
+                avail_by_short[short] = c
+                avail_by_short[_enum(c)] = c
+
+            # Friendly aliases used in docs / older prompts.
+            aliases = {
+                "GPUDuration": "EventGPUDuration",
+                "Duration": "EventGPUDuration",
+                "EventDuration": "EventGPUDuration",
+            }
+
+            counter_enums = []
+            for name in counters:
+                key = str(name).split(".")[-1]
+                key = aliases.get(key, key)
+                c = avail_by_short.get(key)
+                if c is None:
+                    try:
+                        cand = getattr(rd.GPUCounter, key)
+                        # Only use enum if this capture actually exposes it
+                        # (or EnumerateCounters returned empty — rare).
+                        if not available or avail_by_short.get(
+                                _enum(cand).split(".")[-1]) is not None:
+                            c = avail_by_short.get(
+                                _enum(cand).split(".")[-1], cand if not available else None)
+                    except AttributeError:
+                        c = None
+                if c is None:
+                    for short, enum_c in list(avail_by_short.items()):
+                        if "." in short:
+                            continue
+                        if key.lower() in short.lower():
+                            c = enum_c
+                            break
+                if c is None:
+                    avail_names = sorted(set(
+                        _enum(x).split(".")[-1] for x in available))
+                    raise RuntimeError(
+                        "Unknown or unavailable counter '%s'. "
+                        "Available on this capture: %s" % (
+                            name, ", ".join(avail_names) or "(none)"))
+                if c not in counter_enums:
+                    counter_enums.append(c)
+
+            descs = {}
+            for c in counter_enums:
+                descs[c] = controller.DescribeCounter(c)
+            results = controller.FetchCounters(counter_enums)
+            wanted = set(int(e) for e in event_ids) if event_ids else None
+            out = []
+            for r in results:
+                if wanted is not None and int(r.eventId) not in wanted:
+                    continue
+                desc = descs.get(r.counter)
+                if desc is not None and desc.resultType == rd.CompType.Float:
+                    value = float(r.value.d) if desc.resultByteWidth == 8 else float(r.value.f)
+                elif desc is not None and desc.resultByteWidth == 8:
+                    value = int(r.value.u64)
+                else:
+                    value = int(r.value.u32)
+                out.append({
+                    "eventId": int(r.eventId),
+                    "counter": _enum(r.counter),
+                    "value": value,
+                })
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_event_chunk(self, args):
+        self._require_loaded()
+        event_id = int(args["event_id"])
+
+        def fn(controller):
+            mapping = _build_action_map(controller)
+            action = mapping.get(event_id)
+            if action is None:
+                raise RuntimeError("No action found for eventId %d." % event_id)
+            sdfile = controller.GetStructuredFile()
+            chunk = None
+            for ev in action.events:
+                if int(ev.eventId) == event_id:
+                    chunk = sdfile.chunks[ev.chunkIndex]
+                    break
+            if chunk is None and action.events:
+                chunk = sdfile.chunks[action.events[-1].chunkIndex]
+            if chunk is None:
+                raise RuntimeError("No chunk found for eventId %d." % event_id)
+
+            def serialise(obj, depth=0):
+                node = getattr(obj, "data", obj)
+                children = list(node.children) if hasattr(node, "children") and node.children else []
+                if children and depth < 6:
+                    return dict((c.name, serialise(c, depth + 1)) for c in children)
+                try:
+                    return obj.AsString() if hasattr(obj, "AsString") else str(obj)
+                except Exception:
+                    return str(obj)
+
+            params = {}
+            for child in chunk.data.children:
+                params[child.name] = serialise(child)
+            return {"eventId": event_id, "apiCall": chunk.name, "parameters": params}
+
+        return json.dumps(self.run(fn), indent=2)

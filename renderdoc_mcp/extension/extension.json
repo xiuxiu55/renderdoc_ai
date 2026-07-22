@@ -1,0 +1,9 @@
+{
+    "extension_api": 1,
+    "name": "AI 助手 (CodeBuddy)",
+    "version": "0.2.0",
+    "minimum_renderdoc": "1.20",
+    "description": "Embeds an AI assistant panel inside RenderDoc that connects directly to CodeBuddy (codebuddy --serve) and analyzes the frame you are currently viewing in real time. Each message is augmented with live frame context (API, EID, current action, pipeline, shaders); quick actions analyze drawcalls, pipeline state and shader disassembly. Supports CodeBuddy model selection via the ACP protocol.\n\nUses a ctypes/ws2_32 HTTP client so it works in RenderDoc's socket-less bundled Python.",
+    "author": "renderdoc-mcp",
+    "url": "https://github.com/baldurk/renderdoc"
+}
