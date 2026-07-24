@@ -22,12 +22,26 @@ FILES = [
     "live_frame.py",
 ]
 
+# Shared hot-question playbook (also used by the MCP server).
+PLAYBOOK_DIRNAME = "playbook"
+PLAYBOOK_FILES = [
+    "__init__.py", "registry.py", "runtime.py", "analyzers.py", "questions.json",
+]
+
 
 def default_extensions_dir():
     if sys.platform == "win32":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
         return os.path.join(base, "qrenderdoc", "extensions")
     return os.path.join(os.path.expanduser("~"), ".local", "share", "qrenderdoc", "extensions")
+
+
+def _copy_playbook(src_playbook, dest_playbook):
+    os.makedirs(dest_playbook, exist_ok=True)
+    for name in PLAYBOOK_FILES:
+        src = os.path.join(src_playbook, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(dest_playbook, name))
 
 
 def main():
@@ -37,6 +51,8 @@ def main():
     args = parser.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
+    pkg_root = os.path.dirname(here)
+    src_playbook = os.path.join(pkg_root, PLAYBOOK_DIRNAME)
     ext_root = args.dest or default_extensions_dir()
     target = os.path.join(ext_root, EXT_NAME)
 
@@ -51,6 +67,14 @@ def main():
     if args.link:
         try:
             os.symlink(here, target, target_is_directory=True)
+            # Playbook lives next to extension/ in the package; also expose it
+            # inside the linked tree via a second link when possible.
+            link_pb = os.path.join(target, PLAYBOOK_DIRNAME)
+            if os.path.isdir(src_playbook) and not os.path.exists(link_pb):
+                try:
+                    os.symlink(src_playbook, link_pb, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    _copy_playbook(src_playbook, link_pb)
             print("Linked %s -> %s" % (target, here))
             return
         except (OSError, NotImplementedError) as exc:
@@ -61,6 +85,10 @@ def main():
         src = os.path.join(here, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(target, name))
+    if os.path.isdir(src_playbook):
+        _copy_playbook(src_playbook, os.path.join(target, PLAYBOOK_DIRNAME))
+    else:
+        print("WARNING: playbook not found at %s" % src_playbook)
     print("Installed extension to: %s" % target)
     print("Now open RenderDoc -> Tools -> Manage Extensions, and Load 'CodeBuddy MCP (live frame)'.")
 

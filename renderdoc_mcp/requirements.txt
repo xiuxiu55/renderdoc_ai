@@ -5,6 +5,15 @@ mcp>=1.2.0
 starlette>=0.37
 uvicorn>=0.27
 
+# Cursor sidecar (panel chat backend alternative to CodeBuddy):
+#   pip install httpx
+#   set CURSOR_API_KEY=...
+#   python -m renderdoc_mcp.cursor_sidecar --port 8080
+# Cloud Agents HTTP (avoids Windows WinError 10038 from local cursor-sdk Bridge).
+httpx>=0.27
+# Optional: only needed if you re-enable local Bridge experiments.
+# cursor-sdk>=1.0.0
+
 # NOTE: the 'renderdoc' module itself is NOT installable from PyPI. It is the
 # native module (renderdoc.pyd / renderdoc.so) produced by building RenderDoc.
 # Point RENDERDOC_MODULE_PATH at the build output directory that contains it.

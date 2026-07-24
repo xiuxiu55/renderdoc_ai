@@ -44,18 +44,29 @@ def _import_renderdoc(module_path: Optional[str]) -> Any:
         module_path = os.path.abspath(module_path)
         if not os.path.isdir(module_path):
             raise RenderDocError(f"RenderDoc module path does not exist: {module_path}")
-        if module_path not in sys.path:
-            sys.path.insert(0, module_path)
-        # Ensure the native library sitting next to the module is discoverable.
-        os.environ["PATH"] = module_path + os.pathsep + os.environ.get("PATH", "")
-        if sys.platform == "win32" and sys.version_info >= (3, 8):
-            try:
-                os.add_dll_directory(module_path)
-            except (OSError, AttributeError):
-                pass
-        else:
+        # Development builds often put renderdoc.pyd under pymodules/ and the
+        # native DLL next to the Development root — search both.
+        search_dirs = [module_path]
+        pymodules = os.path.join(module_path, "pymodules")
+        if os.path.isdir(pymodules):
+            search_dirs.insert(0, pymodules)
+        parent = os.path.dirname(module_path)
+        if os.path.basename(module_path).lower() == "pymodules" and os.path.isdir(parent):
+            search_dirs.append(parent)
+        for d in search_dirs:
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            if sys.platform == "win32" and sys.version_info >= (3, 8):
+                try:
+                    os.add_dll_directory(d)
+                except (OSError, AttributeError):
+                    pass
+        if sys.platform != "win32":
             os.environ["LD_LIBRARY_PATH"] = (
-                module_path + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
+                os.pathsep.join(search_dirs)
+                + os.pathsep
+                + os.environ.get("LD_LIBRARY_PATH", "")
             )
 
     try:

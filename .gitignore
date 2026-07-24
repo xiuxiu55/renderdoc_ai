@@ -48,3 +48,6 @@ qrenderdoc/3rdparty/pyside
 .DS_Store
 plugins-*/
 __pycache__
+.cursor_api_key
+.env
+*.local.env

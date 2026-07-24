@@ -23,13 +23,29 @@ import threading
 import qrenderdoc as qrd
 
 _EXT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _EXT_DIR not in sys.path:
-    sys.path.insert(0, _EXT_DIR)
+_PKG_ROOT = os.path.dirname(_EXT_DIR)
+for _p in (_EXT_DIR, _PKG_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import acp_client
 import codebuddy_client
 import http_ctypes
 from live_frame import LiveFrame
+
+try:
+    from playbook import (  # type: ignore
+        CallableBackend,
+        format_result as _pb_format,
+        list_questions as _pb_list,
+        match_question as _pb_match,
+        run_question as _pb_run,
+    )
+    _HAS_PLAYBOOK = True
+except Exception:  # noqa: BLE001
+    _HAS_PLAYBOOK = False
+    CallableBackend = None  # type: ignore
+    _pb_format = _pb_list = _pb_match = _pb_run = None  # type: ignore
 
 extiface_version = ""
 
@@ -37,6 +53,71 @@ live = None          # type: LiveFrame
 cur_window = None    # type: Window
 
 DEFAULT_PORT = 8080
+
+CMD_CODEBUDDY = "codebuddy --serve --port 8080"
+CMD_CURSOR_SIDECAR = "python -m renderdoc_mcp.cursor_sidecar --port 8080"
+
+
+def _copy_to_clipboard(text):
+    """Copy Unicode text to the Windows clipboard (RenderDoc Python has no Qt clipboard helper)."""
+    text = text or ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        if not user32.OpenClipboard(None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError(ctypes.get_last_error())
+            hmem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not hmem:
+                raise ctypes.WinError(ctypes.get_last_error())
+            ptr = kernel32.GlobalLock(hmem)
+            if not ptr:
+                raise ctypes.WinError(ctypes.get_last_error())
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(hmem)
+            if not user32.SetClipboardData(CF_UNICODETEXT, hmem):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Ownership of hmem transferred to the clipboard; do not free.
+        finally:
+            user32.CloseClipboard()
+        return True
+    except Exception:  # noqa: BLE001
+        # Fallback: clip.exe (may mangle non-ASCII on some code pages).
+        try:
+            import subprocess
+            p = subprocess.Popen(
+                ["clip"], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.communicate(text.encode("mbcs", "replace"))
+            return p.returncode == 0
+        except Exception:  # noqa: BLE001
+            return False
 
 # --- RenderDoc tool-calling loop -------------------------------------------
 #
@@ -107,15 +188,16 @@ def _agent_system_prompt():
 
 
 def _analysis_prompt(topic, question, data_for_model):
-    """Short tool-free prompt. Keep it small — long/jailbreak-y prompts often
-    trigger CodeBuddy ACP ``stopReason=refusal``."""
-    q = (question or topic or "请分析以下数据").strip()
+    """Short tool-free prompt. Avoid role-play / jailbreak-style framing —
+    some models treat that as ``stopReason=refusal``."""
+    q = (question or topic or "请分析以下 RenderDoc 采样数据").strip()
     return (
-        "角色：图形调试分析助手。\n"
-        "任务：%s\n"
-        "说明：下列数据已由 RenderDoc 扩展从当前抓帧读取。请用中文给出简洁分析"
-        "（要点列表即可）。\n\n"
-        "数据：\n%s" % (q, data_for_model)
+        "下面是 RenderDoc 扩展从当前已打开抓帧读取的性能/帧数据摘要。\n"
+        "请直接根据这些数据用中文做简洁技术分析（要点列表），"
+        "指出最耗时或最可疑的事件，并给出可执行的优化建议。\n"
+        "不需要访问任何外部工具；数据已完整给出。\n\n"
+        "问题：%s\n\n"
+        "数据摘要：\n%s" % (q, data_for_model)
     )
 
 
@@ -163,8 +245,29 @@ def _summarize_drawcalls_local(actions_raw, top_n=20):
             lines.append(
                 "%2d. EID %-6d  idx=%s  inst=%s  score=%s  %s" % (
                     i, eid, indices, instances, score, name))
-    lines += ["", "原始 JSON（截断）：", _cap_result(actions_raw, 8000)]
     return "\n".join(lines)
+
+
+def _model_payload_from_local(local_data, limit=3500):
+    """Build a short, model-safe payload from the local display block.
+
+    Prefer the ranked summary / 本地解读 sections; strip raw JSON dumps that
+    inflate the prompt and raise refusal rates.
+    """
+    text = local_data or ""
+    cut_markers = (
+        "\n完整 drawcall 列表 JSON",
+        "\n完整计数器 JSON",
+        "\n原始 JSON",
+        "\n```json",
+    )
+    cut_at = len(text)
+    for m in cut_markers:
+        i = text.find(m)
+        if i >= 0:
+            cut_at = min(cut_at, i)
+    text = text[:cut_at].strip()
+    return _cap_result(text, limit)
 
 
 def _extract_json_object(text, start):
@@ -272,17 +375,52 @@ def _is_timing_query(text):
 
 
 def _looks_like_refusal(text):
-    """True if the model refused or claimed it cannot access RenderDoc data."""
-    t = text or ""
-    markers = (
-        "拒绝了该请求", "拒絕了該請求", "refusal",
-        "无法访问", "無法訪問", "无法直接", "無法直接", "没有数据", "沒有數據",
-        "无法连接", "無法連接", "不能访问", "不能訪問", "请导出", "請導出",
-        "粘贴", "粘貼", "无法自动", "無法自動", "没有 timing", "没有timing",
-        "do not have access", "cannot access", "can't access", "no timing",
-    )
+    """True only for hard refusals — not for normal disclaimers.
+
+    Models often say "我无法直接访问 RenderDoc，但根据你提供的数据…" and then
+    give a useful analysis. Matching phrases like "无法直接" / "cannot access"
+    used to discard those answers and show a false refusal error.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
     tl = t.lower()
-    return any(m.lower() in tl for m in markers)
+
+    # Our own ACP helper notes.
+    if "拒绝了该请求" in t or "拒絕了該請求" in t:
+        return True
+    if "codebuddy 拒绝" in tl:
+        return True
+
+    # Hard policy refusals (English / Chinese). Require the refusal to be the
+    # main point — if the reply also analyzes provided numbers, keep it.
+    hard = (
+        "i can't help with that",
+        "i cannot help with that",
+        "i'm not able to help with that",
+        "i am not able to help with that",
+        "cannot assist with that",
+        "won't be able to assist",
+        "against my guidelines",
+        "violates",
+        "抱歉，我无法协助",
+        "抱歉，我不能协助",
+        "我不能协助该请求",
+        "我无法协助该请求",
+        "无法提供这方面的帮助",
+    )
+    if any(m in tl for m in hard):
+        # If it still produced a concrete ranking / ms analysis, treat as OK.
+        if any(k in t for k in ("EID", "ms", "耗时", "瓶颈", "draw", "优化")):
+            return False
+        return True
+
+    # stopReason text leaked into rendered transcript with no real answer.
+    if "stopreason=refusal" in tl.replace(" ", ""):
+        return True
+    if "stopreason" in tl and "refusal" in tl and len(t) < 400:
+        return True
+    return False
 
 
 def _is_acp_refusal(acp):
@@ -293,114 +431,22 @@ def _is_acp_refusal(acp):
         return False
 
 
-def _gather_timing_bundle(top_n=30):
-    """Prefetch drawcalls + EventGPUDuration and return a ready-to-analyze text blob.
-
-    This is the reliable path for “分析 Event Browser 耗时”: it does not depend
-    on the model inventing a ``@@RDTOOL@@`` call.
-    """
+def _run_playbook_local(question_id, params=None):
+    """Collect + analyze via shared playbook (no CodeBuddy)."""
+    if not _HAS_PLAYBOOK:
+        return "Playbook 未安装。请重新运行 extension/install.py。"
     if live is None or not live.loaded():
-        return "RenderDoc 尚未加载任何抓帧，无法采样 GPU 耗时。"
+        return "RenderDoc 尚未加载任何抓帧。"
+    backend = CallableBackend(lambda tool, args: _run_rd_tool(tool, args))
+    result = _pb_run(question_id, backend, params=params)
+    return _pb_format(result)
 
-    actions_raw = _run_rd_tool("list_actions", {"drawcalls_only": True})
 
-    # RenderDoc enum is EventGPUDuration (GPUDuration is only a friendly alias).
-    counter_name = "EventGPUDuration"
-    pick_raw = _run_rd_tool("pick_duration_counter", {})
-    try:
-        pick = json.loads(pick_raw)
-    except ValueError:
-        pick = None
-    if isinstance(pick, dict) and isinstance(pick.get("chosen"), dict):
-        counter_name = pick["chosen"].get("short") or counter_name
-
-    counters_raw = _run_rd_tool("fetch_counters", {"counters": [counter_name]})
-
-    try:
-        actions = json.loads(actions_raw)
-    except ValueError:
-        actions = None
-    try:
-        counters = json.loads(counters_raw)
-    except ValueError:
-        counters = None
-
-    # Flatten action tree -> {eventId: name}
-    names = {}
-
-    def walk(nodes):
-        if not isinstance(nodes, list):
-            return
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            eid = n.get("eventId")
-            if eid is None:
-                eid = n.get("event_id")
-            name = n.get("name") or n.get("action") or n.get("customName") or ""
-            if eid is not None:
-                names[int(eid)] = name
-            for key in ("children", "actions", "childActions"):
-                if key in n:
-                    walk(n[key])
-
-    if isinstance(actions, list):
-        walk(actions)
-    elif isinstance(actions, dict) and "error" not in actions:
-        walk(actions.get("children") or actions.get("actions") or [actions])
-
-    # Merge duration samples by eventId and rank.
-    ranked = []
-    fetch_error = None
-    if isinstance(counters, dict) and counters.get("error"):
-        fetch_error = counters.get("error")
-    if isinstance(counters, list):
-        for row in counters:
-            if not isinstance(row, dict):
-                continue
-            eid = int(row.get("eventId", -1))
-            val = float(row.get("value", 0.0))
-            ranked.append((val, eid, names.get(eid, "")))
-    ranked.sort(reverse=True)
-
-    avail_note = ""
-    if isinstance(pick, dict) and pick.get("available") is not None:
-        avail = pick.get("available") or []
-        if not avail:
-            avail_note = "当前抓帧 EnumerateCounters 为空（常见于部分 GLES/EGL 设备），无法提供 GPU 计时。"
-        else:
-            shorts = [a.get("short", "") for a in avail if isinstance(a, dict)]
-            avail_note = "本抓帧可用计数器: %s" % (", ".join(shorts) if shorts else "(none)")
-
-    lines = [
-        "【已自动从 RenderDoc 采样的 GPU 耗时数据】",
-        "计数器: %s（单位通常为纳秒 ns；换算: 1e6 ns = 1 ms）" % counter_name,
-        avail_note,
-        "绘制事件数(含名称): %d；计数器样本数: %d" % (len(names), len(ranked)),
-        "",
-        "Top %d 最耗时事件:" % top_n,
-    ]
-    if fetch_error:
-        lines.append("(采样失败: %s)" % fetch_error)
-    elif not ranked:
-        lines.append("(未拿到耗时样本。该 API/驱动可能不支持 EventGPUDuration，"
-                     "或抓帧尚未完成 replay。原始结果见下方 JSON。)")
-    else:
-        total = sum(v for v, _e, _n in ranked) or 1.0
-        for i, (val, eid, name) in enumerate(ranked[:top_n], 1):
-            ms = val / 1e6
-            pct = 100.0 * val / total
-            lines.append("%2d. EID %-6d  %8.3f ms  (%5.1f%%)  %s" % (i, eid, ms, pct, name))
-
-    lines += [
-        "",
-        "完整 drawcall 列表 JSON：",
-        _cap_result(actions_raw, 12000),
-        "",
-        "完整计数器 JSON：",
-        _cap_result(counters_raw, 12000),
-    ]
-    return "\n".join(lines)
+def _gather_timing_bundle(top_n=30):
+    """Prefetch GPU timing via playbook (local, model-free)."""
+    if _HAS_PLAYBOOK:
+        return _run_playbook_local("gpu_top_draws", params={"top_n": top_n})
+    return "Playbook 未安装，无法采样 GPU 耗时。请运行 extension/install.py。"
 
 
 class Window(qrd.CaptureViewer):
@@ -431,10 +477,21 @@ class Window(qrd.CaptureViewer):
         welcome = self.mqt.CreateLabel()
         self.mqt.SetWidgetText(
             welcome,
-            "欢迎使用 AI 助手 (CodeBuddy)。先运行  codebuddy --serve --port 8080 ，再点击“重新连接”。"
-            "发送消息时会自动附带当前帧上下文（EID / API / 管线），并允许 AI 主动调用 RenderDoc 接口"
-            "（drawcall 列表、GPU 耗时、管线、着色器等）来分析。")
+            "欢迎使用 AI 助手。聊天后端二选一（点下方按钮复制命令到剪贴板），"
+            "在终端运行后再点“重新连接”。"
+            "Cursor sidecar 还需设置 CURSOR_API_KEY。"
+            "热门问题/快捷按钮为本地分析，不依赖后端。")
         self.mqt.AddWidget(root, welcome)
+
+        cmd_row = self.mqt.CreateHorizontalContainer()
+        self.mqt.AddWidget(root, cmd_row)
+        self._add_copy_cmd(
+            cmd_row, "复制 CodeBuddy 命令", CMD_CODEBUDDY)
+        self._add_copy_cmd(
+            cmd_row, "复制 Cursor sidecar 命令", CMD_CURSOR_SIDECAR)
+        self.copyHint = self.mqt.CreateLabel()
+        self.mqt.SetWidgetText(self.copyHint, "")
+        self.mqt.AddWidget(cmd_row, self.copyHint)
 
         # connection + model row
         conn = self.mqt.CreateHorizontalContainer()
@@ -467,7 +524,24 @@ class Window(qrd.CaptureViewer):
         self.contextLabel = self.mqt.CreateLabel()
         self.mqt.AddWidget(root, self.contextLabel)
 
-        # quick actions
+        # hot-question playbook row (local analysis, no CodeBuddy required)
+        play = self.mqt.CreateHorizontalContainer()
+        self.mqt.AddWidget(root, play)
+        playLabel = self.mqt.CreateLabel()
+        self.mqt.SetWidgetText(playLabel, "热门问题:")
+        self.mqt.AddWidget(play, playLabel)
+        self.questionCombo = self.mqt.CreateComboBox(
+            False, lambda c, w, d: None)
+        self.mqt.AddWidget(play, self.questionCombo)
+        self.runQuestionBtn = self.mqt.CreateButton(
+            lambda c, w, d: self._qa_run_selected_question())
+        self.mqt.SetWidgetText(self.runQuestionBtn, "分析")
+        self.mqt.AddWidget(play, self.runQuestionBtn)
+        self._question_titles = []
+        self._question_ids = []
+        self._populate_questions()
+
+        # quick actions (all local playbook paths)
         quick = self.mqt.CreateHorizontalContainer()
         self.mqt.AddWidget(root, quick)
         self._add_quick(quick, "分析当前帧", self._qa_analyze_frame)
@@ -509,6 +583,89 @@ class Window(qrd.CaptureViewer):
         btn = self.mqt.CreateButton(lambda c, w, d: fn())
         self.mqt.SetWidgetText(btn, label)
         self.mqt.AddWidget(parent, btn)
+
+    def _add_copy_cmd(self, parent, label, command):
+        def on_click(c=None, w=None, d=None, cmd=command, name=label):
+            ok = _copy_to_clipboard(cmd)
+            if ok:
+                tip = "已复制: %s" % cmd
+            else:
+                tip = "复制失败，请手动复制: %s" % cmd
+            try:
+                self.mqt.SetWidgetText(self.copyHint, "  " + tip)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._set_status(tip)
+            except Exception:  # noqa: BLE001
+                pass
+        btn = self.mqt.CreateButton(on_click)
+        self.mqt.SetWidgetText(btn, label)
+        self.mqt.AddWidget(parent, btn)
+
+    def _populate_questions(self):
+        self._question_titles = []
+        self._question_ids = []
+        if not _HAS_PLAYBOOK:
+            self._question_titles = ["(playbook 未安装)"]
+            self._question_ids = [""]
+        else:
+            for q in _pb_list(path="panel"):
+                self._question_ids.append(q["id"])
+                self._question_titles.append(q.get("title") or q["id"])
+            if not self._question_titles:
+                self._question_titles = ["(无问题)"]
+                self._question_ids = [""]
+        try:
+            self.mqt.SetComboOptions(self.questionCombo, self._question_titles)
+            if self._question_titles:
+                self.mqt.SelectComboOption(self.questionCombo, self._question_titles[0])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _show_local_report(self, label, report):
+        self.history_text += "🧑 你：\n%s\n\n🤖 本地分析：\n%s\n\n" % (label, report)
+        self.mqt.SetWidgetText(self.history, self.history_text)
+
+    def _qa_playbook(self, question_id, label=None):
+        if self.busy:
+            return
+        if not question_id:
+            return
+        self.busy = True
+        self.mqt.SetWidgetEnabled(self.sendBtn, False)
+        shown = label or question_id
+        self.history_text += "🧑 你：\n%s\n\n" % shown
+        self.mqt.SetWidgetText(
+            self.history, self.history_text + "🤖 本地分析：\n（采样中…）")
+
+        def worker():
+            try:
+                report = _run_playbook_local(question_id)
+            except Exception as exc:  # noqa: BLE001
+                report = "分析失败: %s" % exc
+
+            def finish():
+                self.history_text += "🤖 本地分析：\n%s\n\n" % report
+                self.mqt.SetWidgetText(self.history, self.history_text)
+                self.mqt.SetWidgetEnabled(self.sendBtn, True)
+                self.busy = False
+            self._ui(finish)
+
+        _spawn(worker)
+
+    def _qa_run_selected_question(self):
+        try:
+            title = self.mqt.GetWidgetText(self.questionCombo)
+        except Exception:  # noqa: BLE001
+            title = ""
+        qid = ""
+        if title in self._question_titles:
+            qid = self._question_ids[self._question_titles.index(title)]
+        elif self._question_ids:
+            qid = self._question_ids[0]
+            title = self._question_titles[0]
+        self._qa_playbook(qid, label=title)
 
     def _set_status(self, text):
         self.mqt.SetWidgetText(self.statusLabel, "状态: " + text)
@@ -578,8 +735,9 @@ class Window(qrd.CaptureViewer):
                 self.acp = None
                 # Fall back to a health check on the simple gateway.
                 ok = codebuddy_client.health(self.port)
-                msg = ("已连接(基础模式，无法切换模型): %s" % exc) if ok \
-                    else "未连接 — 请先运行 codebuddy --serve --port %d" % self.port
+                msg = ("已连接(基础模式，无法切换模型): %s" % exc) if ok else (
+                    "未连接 — 请先运行 codebuddy --serve 或 "
+                    "python -m renderdoc_mcp.cursor_sidecar --port %d" % self.port)
                 self._ui(lambda: self._set_status(msg))
         _spawn(worker)
 
@@ -679,46 +837,44 @@ class Window(qrd.CaptureViewer):
 
         def worker():
             try:
-                timing = (_is_timing_query(user_text) or _is_timing_query(label or "")
-                          or (prebuilt is not None and "GPUDuration" in (prebuilt or "")))
-                drawcalls = (
-                    "drawcall" in (user_text or "").lower()
-                    or "drawcall" in (label or "").lower()
-                    or "绘制" in (user_text or "")
-                    or "绘制" in (label or "")
-                )
-                # Local-first paths: always show RenderDoc data even if CodeBuddy
-                # returns ACP stopReason=refusal for every model prompt.
-                if timing:
-                    reply = self._answer_timing(
-                        user_text or label or "分析资源耗时",
-                        token, port, prebuilt=prebuilt)
-                elif prebuilt is not None:
-                    reply = self._answer_local_first(
-                        label or user_text or "分析",
-                        user_text or label or "",
-                        prebuilt, token, port)
-                elif drawcalls:
-                    try:
-                        raw = live.list_actions({"drawcalls_only": True}) if live else "{}"
-                    except Exception as exc:  # noqa: BLE001
-                        raw = "(获取失败: %s)" % exc
-                    data = _summarize_drawcalls_local(raw)
-                    reply = self._answer_local_first(
-                        "分析 Drawcalls",
-                        user_text or "请分析 drawcall 列表，找出可能较重的绘制。",
-                        data, token, port)
+                # Prefer shared playbook match — local report, no model required.
+                matched = None
+                if _HAS_PLAYBOOK and prebuilt is None:
+                    matched = _pb_match(user_text or label or "", path="panel")
+                if matched is not None:
+                    reply = _run_playbook_local(matched["id"])
                 else:
-                    if attach_context:
-                        body = self._frame_context() + "\n\n用户问题：\n" + user_text
+                    timing = (_is_timing_query(user_text) or _is_timing_query(label or "")
+                              or (prebuilt is not None and "GPUDuration" in (prebuilt or "")))
+                    drawcalls = (
+                        "drawcall" in (user_text or "").lower()
+                        or "drawcall" in (label or "").lower()
+                        or "绘制" in (user_text or "")
+                        or "绘制" in (label or "")
+                    )
+                    if timing:
+                        reply = self._answer_timing(
+                            user_text or label or "分析资源耗时",
+                            token, port, prebuilt=prebuilt)
+                    elif prebuilt is not None:
+                        reply = self._answer_local_first(
+                            label or user_text or "分析",
+                            user_text or label or "",
+                            prebuilt, token, port)
+                    elif drawcalls:
+                        reply = _run_playbook_local("drawcall_heavy")
                     else:
-                        body = user_text
-                    # Keep free-form prompts short to reduce refusal rate.
-                    first_prompt = _analysis_prompt(
-                        "自由问答", user_text, _cap_result(body, 6000))
-                    reply = self._run_agent_or_local(first_prompt, token, port, body)
-                    if not reply:
-                        reply = "(CodeBuddy 没有返回文本内容)"
+                        if attach_context:
+                            body = self._frame_context() + "\n\n用户问题：\n" + user_text
+                        else:
+                            body = user_text
+                        first_prompt = _analysis_prompt(
+                            "自由问答", user_text,
+                            _model_payload_from_local(body, 3500))
+                        reply = self._run_agent_or_local(
+                            first_prompt, token, port, body)
+                        if not reply:
+                            reply = "(CodeBuddy 没有返回文本内容)"
 
                 def finish():
                     self.history_text = self._reply_base + reply + "\n\n"
@@ -744,22 +900,18 @@ class Window(qrd.CaptureViewer):
     def _answer_timing(self, question, token, port, prebuilt=None):
         self._ui(lambda: self.mqt.SetWidgetText(
             self.history, self._reply_base + "（正在从 RenderDoc 采样 GPU 耗时…）"))
-        if prebuilt and "GPUDuration" in prebuilt:
-            bundle = prebuilt
-        else:
-            try:
-                bundle = _gather_timing_bundle()
-            except Exception as exc:  # noqa: BLE001
-                bundle = "采样失败：%s" % exc
-        return self._answer_local_first(
-            "GPU 耗时", question or "请分析本帧 GPU 耗时与瓶颈。",
-            bundle, token, port)
+        if prebuilt and "【本地解读】" in (prebuilt or ""):
+            return prebuilt
+        try:
+            return _gather_timing_bundle()
+        except Exception as exc:  # noqa: BLE001
+            return "采样失败：%s" % exc
 
     def _answer_local_first(self, topic, question, local_data, token, port):
         """Show local RenderDoc data first; ask CodeBuddy only for a short gloss.
 
         If ACP returns ``refusal`` (common with some models), the local block
-        remains the answer so the user is never stuck with only that error line.
+        (including 【本地解读】) remains usable so the user is never stuck.
         """
         local_block = (
             "【RenderDoc 本地结果 — 不依赖 CodeBuddy】\n"
@@ -769,8 +921,9 @@ class Window(qrd.CaptureViewer):
         self._ui(lambda: self.mqt.SetWidgetText(
             self.history, self._reply_base + local_block + "（正在请求 CodeBuddy 解读…）"))
 
-        # Send only a capped slice to the model to avoid refusal on huge payloads.
-        prompt = _analysis_prompt(topic, question, _cap_result(local_data, 5000))
+        # Compact summary only — never the raw counter JSON dump.
+        prompt = _analysis_prompt(
+            topic, question, _model_payload_from_local(local_data, 3500))
         answer = self._ask_codebuddy_once(prompt, token, port, prefix=local_block)
 
         if token is not None and token.cancelled():
@@ -787,37 +940,61 @@ class Window(qrd.CaptureViewer):
                 answer = None
 
         if not answer:
-            return (
-                local_block
-                + "【CodeBuddy】当前模型拒绝或未能生成解读（refusal）。\n"
-                "请在上方下拉框换一个模型后重试；上面的本地结果已可直接使用。\n"
-            ).strip()
+            # Soften the failure line: local Top-N + 本地解读 already answer the question.
+            hint = (
+                "【CodeBuddy】模型未返回可用解读"
+                "（ACP refusal 或空回复）。上面的本地 Top-N / 本地解读可直接使用；"
+                "也可换模型后重试。\n"
+            )
+            return (local_block + hint).strip()
 
         return (local_block + "【CodeBuddy 解读】\n" + answer).strip()
 
     def _ask_codebuddy_once(self, prompt, token, port, prefix=""):
-        """One ACP turn. Returns answer text, or None on refusal/empty."""
+        """One ACP turn. Returns answer text, or None on hard refusal/empty.
+
+        Prefer the raw agent answer text. Do not treat normal disclaimers
+        ("无法直接访问…但根据数据…") as refusal.
+        """
         try:
             raw, rendered = self._one_turn(prompt, token, port, prefix)
         except Exception:  # noqa: BLE001
             return None
-        refused = _is_acp_refusal(self.acp) or _looks_like_refusal(raw or rendered)
-        answer = (raw or "").strip() or (rendered or "").strip()
-        if refused or not answer or answer.startswith("CodeBuddy 拒绝"):
+
+        answer = (raw or "").strip()
+        # If the model produced real answer text, ignore disclaimer heuristics
+        # on the rendered transcript (which may embed our own refusal notes).
+        if answer:
+            if _is_acp_refusal(self.acp) and _looks_like_refusal(answer):
+                return None
+            if answer.startswith("CodeBuddy 拒绝"):
+                return None
+            if _looks_like_refusal(answer) and len(answer) < 80:
+                return None
+            return answer
+
+        # Empty raw answer: fall back to rendered, then apply stricter checks.
+        answer = (rendered or "").strip()
+        if not answer:
             return None
-        # Strip our own refusal helper notes if they leaked into rendered.
+        if _is_acp_refusal(self.acp) or _looks_like_refusal(answer):
+            return None
         if "拒绝了该请求" in answer and "refusal" in answer.lower():
             return None
         return answer
 
     def _run_agent_or_local(self, first_prompt, token, port, local_fallback=""):
         reply = self._run_agent(first_prompt, token, port)
-        if _is_acp_refusal(self.acp) or _looks_like_refusal(reply or ""):
+        # Only treat as refusal when ACP says so, or reply is a short hard refuse.
+        acp_refused = _is_acp_refusal(self.acp)
+        text_refused = (not (reply or "").strip()) or (
+            _looks_like_refusal(reply or "") and len(reply or "") < 120)
+        if acp_refused or text_refused:
             if local_fallback:
                 return (
                     "【RenderDoc 本地上下文】\n%s\n\n"
-                    "【CodeBuddy】拒绝生成解读（refusal）。请换模型后重试。\n"
-                    % _cap_result(local_fallback, 12000)
+                    "【CodeBuddy】未能生成解读。上面的本地上下文可直接使用；也可换模型重试。\n"
+                    % _model_payload_from_local(local_fallback, 8000)
                 ).strip()
         return reply
 
@@ -899,33 +1076,19 @@ class Window(qrd.CaptureViewer):
         _spawn(worker)
 
     def _qa_analyze_frame(self):
-        self._qa_generic(
-            "分析当前帧",
-            "请分析 RenderDoc 当前选中事件在做什么，是否存在性能或正确性方面的问题，并给出优化建议。",
-            lambda: live.get_current_frame({}))
+        self._qa_playbook("current_frame", label="分析当前帧")
 
     def _qa_drawcalls(self):
-        self._qa_generic(
-            "分析 Drawcalls",
-            "请根据 drawcall 摘要找出可能较重的绘制并解释原因；真实 GPU 耗时请结合 EventGPUDuration。",
-            lambda: _summarize_drawcalls_local(
-                live.list_actions({"drawcalls_only": True})))
+        self._qa_playbook("drawcall_heavy", label="分析 Drawcalls")
 
     def _qa_gpu_timing(self):
-        # Go through _send timing path (local EventGPUDuration sample first).
-        self._send("分析 GPU 耗时", attach_context=True, label="分析 GPU 耗时")
+        self._qa_playbook("gpu_top_draws", label="分析 GPU 耗时")
 
     def _qa_pipeline(self):
-        self._qa_generic(
-            "分析管线状态",
-            "请分析当前管线状态的配置是否合理，指出可能的问题。",
-            lambda: live.get_pipeline_state({}))
+        self._qa_playbook("pipeline_state", label="分析管线状态")
 
     def _qa_ps_disasm(self):
-        self._qa_generic(
-            "分析 PS 反汇编",
-            "请分析这个 pixel shader 的反汇编，指出潜在的性能问题与优化点。",
-            lambda: live.get_shader_disassembly({"stage": "Pixel"}))
+        self._qa_playbook("ps_disasm", label="分析 PS 反汇编")
 
     # -- CaptureViewer callbacks -----------------------------------------
 

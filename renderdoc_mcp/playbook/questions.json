@@ -1,0 +1,257 @@
+[
+  {
+    "id": "gpu_top_draws",
+    "title": "本帧 GPU 最耗时的 Draw？",
+    "tags": [
+      "耗时",
+      "性能",
+      "瓶颈",
+      "卡顿",
+      "gpu",
+      "timing",
+      "duration",
+      "drawcall"
+    ],
+    "hot": 100,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "list_actions",
+        "args": {
+          "drawcalls_only": true
+        }
+      },
+      {
+        "tool": "fetch_counters",
+        "args": {
+          "counters": [
+            "EventGPUDuration"
+          ]
+        }
+      }
+    ],
+    "analyze": "timing_topn",
+    "params": {
+      "top_n": 30,
+      "hot_pct": 5.0
+    },
+    "followups": [
+      "pipeline_state",
+      "ps_disasm",
+      "current_frame"
+    ]
+  },
+  {
+    "id": "current_frame",
+    "title": "当前选中事件在做什么？",
+    "tags": [
+      "当前",
+      "事件",
+      "eid",
+      "概览",
+      "帧"
+    ],
+    "hot": 90,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "get_current_frame",
+        "args": {}
+      }
+    ],
+    "analyze": "frame_overview",
+    "params": {},
+    "followups": [
+      "pipeline_state",
+      "gpu_top_draws"
+    ]
+  },
+  {
+    "id": "drawcall_heavy",
+    "title": "哪些 Drawcall 可能较重？",
+    "tags": [
+      "drawcall",
+      "绘制",
+      "indices",
+      "dispatch"
+    ],
+    "hot": 80,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "list_actions",
+        "args": {
+          "drawcalls_only": true
+        }
+      }
+    ],
+    "analyze": "drawcall_summary",
+    "params": {
+      "top_n": 20
+    },
+    "followups": [
+      "gpu_top_draws"
+    ]
+  },
+  {
+    "id": "pipeline_state",
+    "title": "当前管线状态是否合理？",
+    "tags": [
+      "管线",
+      "pipeline",
+      "pso",
+      "rt",
+      "绑定"
+    ],
+    "hot": 75,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "get_pipeline_state",
+        "args": {}
+      }
+    ],
+    "analyze": "pipeline_check",
+    "params": {},
+    "followups": [
+      "ps_disasm",
+      "texture_list"
+    ]
+  },
+  {
+    "id": "ps_disasm",
+    "title": "Pixel Shader 是否偏重？",
+    "tags": [
+      "ps",
+      "pixel",
+      "shader",
+      "反汇编",
+      "着色器"
+    ],
+    "hot": 70,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "get_shader_disassembly",
+        "args": {
+          "stage": "Pixel"
+        }
+      }
+    ],
+    "analyze": "ps_disasm",
+    "params": {},
+    "followups": [
+      "pipeline_state"
+    ]
+  },
+  {
+    "id": "sync_stall",
+    "title": "是否存在同步 / Wait 卡住？",
+    "tags": [
+      "同步",
+      "卡顿",
+      "sync",
+      "wait",
+      "fence",
+      "glClientWaitSync"
+    ],
+    "hot": 65,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "list_actions",
+        "args": {
+          "drawcalls_only": false,
+          "max_depth": 0
+        }
+      }
+    ],
+    "analyze": "sync_stall",
+    "params": {
+      "top_n": 30
+    },
+    "followups": [
+      "gpu_top_draws"
+    ]
+  },
+  {
+    "id": "texture_list",
+    "title": "纹理分辨率 / 格式是否异常？",
+    "tags": [
+      "纹理",
+      "texture",
+      "分辨率",
+      "rt",
+      "格式"
+    ],
+    "hot": 60,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "list_textures",
+        "args": {}
+      }
+    ],
+    "analyze": "texture_overview",
+    "params": {
+      "top_n": 25
+    },
+    "followups": [
+      "pipeline_state"
+    ]
+  },
+  {
+    "id": "capture_info",
+    "title": "这帧是什么 API / 驱动？",
+    "tags": [
+      "api",
+      "驱动",
+      "capture",
+      "信息"
+    ],
+    "hot": 50,
+    "paths": [
+      "mcp",
+      "panel"
+    ],
+    "collect": [
+      {
+        "tool": "get_capture_info",
+        "args": {},
+        "optional": true
+      },
+      {
+        "tool": "get_current_frame",
+        "args": {},
+        "optional": true
+      }
+    ],
+    "analyze": "capture_info",
+    "params": {},
+    "followups": [
+      "gpu_top_draws",
+      "current_frame"
+    ]
+  }
+]

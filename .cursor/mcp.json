@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "renderdoc": {
+      "command": "C:/Users/wsshanwang/AppData/Local/Programs/Python/Python312/python.exe",
+      "args": ["-m", "renderdoc_mcp.server"],
+      "cwd": "G:/renderdoc_ai_XIUXIU",
+      "env": {
+        "RENDERDOC_MODULE_PATH": "G:/renderdoc_ai_XIUXIU/x64/Development",
+        "PYTHONPATH": "G:/renderdoc_ai_XIUXIU;G:/renderdoc_ai_XIUXIU/x64/Development/pymodules;G:/renderdoc_ai_XIUXIU/x64/Development"
+      }
+    }
+  }
+}

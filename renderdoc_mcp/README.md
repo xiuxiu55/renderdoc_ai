@@ -62,18 +62,36 @@ The server speaks MCP over stdio.
 
 ## Configuring in Cursor
 
-Add an entry to your `mcp.json` (`.cursor/mcp.json` in the project, or the global
-one). Adjust the interpreter, script path and `RENDERDOC_MODULE_PATH`:
+This repo already ships a project MCP config at [`.cursor/mcp.json`](../.cursor/mcp.json).
+It points at the local Development build and does **not** replace the in-UI
+CodeBuddy panel — both can coexist:
+
+| 入口 | 用途 |
+|------|------|
+| Cursor MCP (`renderdoc`) | 在 Cursor 里 `load_capture` / `run_question` 分析 `.rdc` |
+| RenderDoc 面板 CodeBuddy | 仍可用 `codebuddy --serve`（有额度时） |
+| 面板热门问题 Playbook | 本地分析，不依赖 CodeBuddy / Cursor |
+
+Reload MCP in Cursor (**Settings → MCP → refresh**, or restart Cursor) after
+editing `.cursor/mcp.json`.
+
+**Python ABI note:** `renderdoc.pyd` in this tree is built for **Python 3.6**.
+The MCP config uses Python 3.12 so the server process can start and expose
+playbook tools; `load_capture` / replay tools need a matching 3.6 interpreter
+(or rebuild RenderDoc against 3.12 and point `command` at that Python).
+
+Manual / alternate `mcp.json` shape:
 
 ```json
 {
   "mcpServers": {
     "renderdoc": {
-      "command": "python",
+      "command": "C:/Users/you/AppData/Local/Programs/Python/Python312/python.exe",
       "args": ["-m", "renderdoc_mcp.server"],
-      "cwd": "G:/renderdoc-code",
+      "cwd": "G:/renderdoc_ai_XIUXIU",
       "env": {
-        "RENDERDOC_MODULE_PATH": "C:/path/to/renderdoc/build/bin"
+        "RENDERDOC_MODULE_PATH": "G:/renderdoc_ai_XIUXIU/x64/Development",
+        "PYTHONPATH": "G:/renderdoc_ai_XIUXIU;G:/renderdoc_ai_XIUXIU/x64/Development/pymodules;G:/renderdoc_ai_XIUXIU/x64/Development"
       }
     }
   }
@@ -119,6 +137,15 @@ GPU counters:
 - `list_counters()`
 - `fetch_counters(counters, event_ids?)`
 
+Hot-question playbook (local analysis, no LLM):
+
+- `list_hot_questions(tag?)` — catalog from `playbook/questions.json`
+- `describe_hot_question(question_id)` — collect steps / followups
+- `run_question(question_id, params?)` — collect + rule-based report
+
+Prefer `run_question` for common intents (GPU timing, drawcalls, pipeline, sync).
+Add new questions in `playbook/questions.json`; see [`capabilities.md`](capabilities.md).
+
 `stage` is one of `Vertex`, `Hull`, `Domain`, `Geometry`, `Pixel`, `Compute`.
 
 ## Notes on threading
@@ -128,47 +155,60 @@ thread that opened the capture. This server funnels all RenderDoc interactions
 through a single dedicated worker thread (`rd_session.py`), so it stays correct
 even though MCP tool handlers can be dispatched from a worker pool.
 
-## In-RenderDoc AI panel (chat with CodeBuddy about the live frame)
+## In-RenderDoc AI panel (chat about the live frame)
 
-Under `extension/` is a RenderDoc **UI extension** that embeds an
-"AI 助手 (CodeBuddy)" panel directly inside RenderDoc. You chat with CodeBuddy
-about the **frame currently loaded in the UI**, at the currently selected event
-— no separate `.rdc` load. Each message is automatically augmented with live
-frame context (API, EID, current action, pipeline, bound shaders/targets).
+Under `extension/` is a RenderDoc **UI extension** that embeds an AI assistant
+panel. You can chat about the **frame currently loaded in the UI**. Hot-question
+buttons run **locally** (no backend). Free-form chat needs one of:
+
+| Backend | How to start | Notes |
+|---------|--------------|--------|
+| **Cursor sidecar** (recommended if CodeBuddy has no quota) | `start_cursor_sidecar.bat` or `python -m renderdoc_mcp.cursor_sidecar --port 8080` | Needs `CURSOR_API_KEY` + `pip install cursor-sdk` |
+| **CodeBuddy** | `codebuddy --serve --port 8080` | Unchanged; use when you have CodeBuddy quota |
 
 ```
-RenderDoc panel  --ctypes/ws2_32 HTTP-->  codebuddy --serve (ACP, :8080)
-      ^ live frame context (via ctx.Replay().BlockInvoke)
+RenderDoc panel  --ctypes/ws2_32 HTTP-->  cursor_sidecar OR codebuddy  (:8080)
+      ^ live frame / playbook (local)
 ```
 
-### How it connects
+Both backends speak the same CodeBuddy-compatible ACP + `/api/v1/runs` surface.
+Only one process should listen on port 8080 at a time.
 
-CodeBuddy runs separately as an HTTP server (`codebuddy --serve --port 8080`).
-RenderDoc bundles a **cut-down Python 3.6 with no `_socket` module**, so the
-panel talks to CodeBuddy through a tiny **ctypes/ws2_32 HTTP client**
-(`extension/http_ctypes.py`) instead of the standard library. Conversations use
-CodeBuddy's **ACP protocol** (`extension/acp_client.py`), which supports model
-selection and streaming replies; `extension/codebuddy_client.py` is a simpler
-`/api/v1/runs` fallback. Nothing needs to be pip-installed into RenderDoc.
-
-### Install & run
+### Cursor sidecar
 
 ```bash
-# Copy the extension into RenderDoc's user extensions folder
-python renderdoc_mcp/extension/install.py      # or --link to symlink during dev
+# once
+pip install cursor-sdk starlette uvicorn
+set CURSOR_API_KEY=cursor_...   # https://cursor.com/dashboard/integrations
+
+# run (repo root)
+start_cursor_sidecar.bat
+# or:
+python -m renderdoc_mcp.cursor_sidecar --port 8080 --cwd G:/renderdoc_ai_XIUXIU
+```
+
+### How the panel connects
+
+RenderDoc bundles a **cut-down Python 3.6 with no `_socket` module**, so the
+panel uses a tiny **ctypes/ws2_32 HTTP client** (`extension/http_ctypes.py`).
+Conversations use **ACP** (`extension/acp_client.py`) with `/api/v1/runs`
+(`codebuddy_client.py`) as fallback. Nothing Cursor-related is installed into
+RenderDoc itself — only the sidecar process needs `cursor-sdk`.
+
+### Install & run the panel
+
+```bash
+python renderdoc_mcp/extension/install.py      # or --link during dev
 ```
 
 This installs to `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp` (Windows) or
 `~/.local/share/qrenderdoc/extensions/renderdoc_mcp` (Linux). Then:
 
-1. Start CodeBuddy's server: `codebuddy --serve --port 8080`.
+1. Start **either** Cursor sidecar **or** `codebuddy --serve --port 8080`.
 2. In RenderDoc: **Tools → Manage Extensions**, select *AI 助手 (CodeBuddy)*,
-   click **Load** (tick **Always Load** to auto-load). The panel applies
-   RenderDoc's dark UI style.
-3. Open the panel via **Window → AI 助手 (CodeBuddy)** and click **重新连接**.
-   The model dropdown fills from CodeBuddy's available models.
-4. Open a capture, select an event, then type a question or use a quick-action
-   button (分析当前帧 / Drawcalls / 管线状态 / PS 反汇编).
+   click **Load** (tick **Always Load** to auto-load).
+3. Open **Window → AI 助手 (CodeBuddy)** and click **重新连接**.
+4. Open a capture; use hot questions (local) or type a question (needs backend).
 
 ### Live-frame context
 

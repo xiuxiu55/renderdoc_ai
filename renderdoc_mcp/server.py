@@ -841,6 +841,150 @@ def fetch_counters(counters: list[str], event_ids: Optional[list[int]] = None) -
     return json.dumps(session.run(_fetch), indent=2)
 
 
+# ---------------------------------------------------------------------------
+# Hot-question playbook (shared with in-UI panel)
+# ---------------------------------------------------------------------------
+
+
+def _playbook_get_current_frame() -> str:
+    """Synthesize panel-compatible current-frame JSON for MCP backends."""
+    controller = session.require_controller()
+
+    def _get() -> dict:
+        props = controller.GetAPIProperties()
+        eid = int(session.current_event)
+        action = None
+        try:
+            action = session.action_for_event(eid)
+        except Exception:  # noqa: BLE001
+            action = None
+        names = _resource_name_map()
+        data: dict = {
+            "api": _enum(props.pipelineType),
+            "localRenderer": _enum(props.localRenderer),
+            "currentEvent": eid,
+            "totalActions": len(session.all_actions()),
+            "action": _action_summary(action, names) if action is not None else None,
+            "pipeline": None,
+        }
+        return data
+
+    return json.dumps(session.run(_get), indent=2)
+
+
+def _mcp_playbook_call(tool: str, args: Optional[dict] = None) -> str:
+    """Dispatch a playbook collect step onto MCP tool functions."""
+    args = args or {}
+    if tool == "list_actions":
+        return list_actions(
+            parent_event_id=args.get("parent_event_id"),
+            max_depth=int(args.get("max_depth") or 0),
+            drawcalls_only=bool(args.get("drawcalls_only", False)),
+        )
+    if tool == "fetch_counters":
+        return fetch_counters(
+            counters=list(args.get("counters") or ["EventGPUDuration"]),
+            event_ids=args.get("event_ids"),
+        )
+    if tool == "list_counters":
+        return list_counters()
+    if tool == "get_pipeline_state":
+        return get_pipeline_state(event_id=args.get("event_id"))
+    if tool == "get_shader_disassembly":
+        return get_shader_disassembly(
+            stage=str(args.get("stage") or "Pixel"),
+            event_id=args.get("event_id"),
+            target=args.get("target"),
+        )
+    if tool == "get_shader_reflection":
+        return get_shader_reflection(
+            stage=str(args.get("stage") or "Pixel"),
+            event_id=args.get("event_id"),
+        )
+    if tool == "list_textures":
+        return list_textures(name_filter=args.get("name_filter"))
+    if tool == "list_resources":
+        return list_resources(name_filter=args.get("name_filter"))
+    if tool == "get_action":
+        return get_action(event_id=int(args["event_id"]))
+    if tool == "get_event_chunk":
+        return get_event_chunk(event_id=int(args["event_id"]))
+    if tool == "get_capture_info":
+        return get_capture_info()
+    if tool == "get_status":
+        return get_status()
+    if tool == "get_current_frame":
+        return _playbook_get_current_frame()
+    raise RenderDocError("Playbook backend does not support tool '%s'" % tool)
+
+
+@mcp.tool()
+def list_hot_questions(tag: Optional[str] = None) -> str:
+    """List hot analysis questions from the shared playbook (id/title/tags/hot).
+
+    Prefer ``run_question`` after picking an id. Use ``tag`` to filter
+    (e.g. \"耗时\", \"shader\", \"sync\").
+    """
+    try:
+        from renderdoc_mcp.playbook import list_questions  # type: ignore
+    except ImportError:
+        from playbook import list_questions  # type: ignore
+
+    rows = []
+    for q in list_questions(path="mcp", tag=tag):
+        rows.append(
+            {
+                "id": q["id"],
+                "title": q.get("title"),
+                "tags": q.get("tags") or [],
+                "hot": q.get("hot"),
+                "followups": q.get("followups") or [],
+            }
+        )
+    return json.dumps(rows, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def describe_hot_question(question_id: str) -> str:
+    """Describe one playbook question: collect steps, analyzer, followups."""
+    try:
+        from renderdoc_mcp.playbook import describe_question  # type: ignore
+    except ImportError:
+        from playbook import describe_question  # type: ignore
+
+    info = describe_question(question_id)
+    if info is None:
+        return json.dumps({"error": "unknown question_id: %s" % question_id}, ensure_ascii=False)
+    return json.dumps(info, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def run_question(question_id: str, params: Optional[dict] = None) -> str:
+    """Run a hot question locally: collect RenderDoc data + rule-based report.
+
+    Does not call an external LLM. Load a capture first with ``load_capture``.
+    Optional ``params`` may include ``event_id``, ``top_n``, etc.
+    """
+    try:
+        from renderdoc_mcp.playbook import (  # type: ignore
+            CallableBackend,
+            format_result,
+            run_question as _run,
+        )
+    except ImportError:
+        from playbook import (  # type: ignore
+            CallableBackend,
+            format_result,
+            run_question as _run,
+        )
+
+    backend = CallableBackend(_mcp_playbook_call)
+    result = _run(question_id, backend, params=params)
+    payload = dict(result)
+    payload["text"] = format_result(result)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def main() -> None:
     try:
         mcp.run()

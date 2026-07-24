@@ -95,17 +95,30 @@
 
 ---
 
-## 3. 面板快捷按钮 ↔ 意图
+## 3. 热门问题 Playbook（推荐）
 
-| 按钮 | 等价意图 | 预取数据 |
-|------|----------|----------|
-| 分析当前帧 | 概览 + 当前事件 | `get_current_frame` |
-| Drawcalls | 绘制列表 / 谁可能最重 | `list_actions(drawcalls_only)` |
-| GPU 耗时 | Event Browser 真实耗时 | `list_actions` + `fetch_counters(GPUDuration)`（本地排序 Top-N） |
-| 管线状态 | PSO / RT / 绑定 | `get_pipeline_state` |
-| PS 反汇编 | Pixel shader 分析 | `get_shader_disassembly(Pixel)` |
+共享问题库：`playbook/questions.json`。面板与 MCP 共用同一套 collect → analyze。
 
-自由输入时：若命中耗时/性能类关键词，面板会走与「GPU 耗时」相同的预取路径，不依赖模型自觉发 `@@RDTOOL@@`。
+| MCP 工具 | 作用 |
+|----------|------|
+| `list_hot_questions(tag?)` | 列出问题（id / title / tags / hot） |
+| `describe_hot_question(id)` | 查看 collect 步骤与 followups |
+| `run_question(id, params?)` | **本地**执行：采数 + 规则报告（不调 LLM） |
+
+扩展方式：改 `questions.json` 加问题；新能力先加底层 `@mcp.tool` / `live_frame` 方法，再在 `collect` 里引用；解读逻辑放 `playbook/analyzers.py`。
+
+### 面板快捷按钮 ↔ 问题 id
+
+| 按钮 / 下拉 | 问题 id | 说明 |
+|-------------|---------|------|
+| 分析当前帧 | `current_frame` | 本地概览 |
+| Drawcalls | `drawcall_heavy` | 几何量估算 Top-N |
+| GPU 耗时 | `gpu_top_draws` | EventGPUDuration Top-N + 本地解读 |
+| 管线状态 | `pipeline_state` | 管线摘要 |
+| PS 反汇编 | `ps_disasm` | PS 反汇编启发式 |
+| 热门问题下拉 | 任意 | 点「分析」直接跑 |
+
+自由输入：先按 tags 匹配 playbook；命中则本地分析，不再依赖 CodeBuddy。
 
 ---
 
