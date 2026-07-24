@@ -17,6 +17,7 @@
 
 | 用户意图（关键词示例） | 推荐调用顺序 | 可用路径 | 说明 |
 |------------------------|--------------|----------|------|
+| **任意自然语言分析问题** | MCP: `analyze_question(text)`；面板聊天自动走 orchestrator | Both | Intent→Plan→Execute→本地报告（见 `orchestrator/`） |
 | 有没有打开抓帧 / 当前在哪 | `get_status` → 可选 `get_capture_info` | MCP；面板用 `get_current_frame` | 面板没有 `get_status`，用当前帧概览代替 |
 | 这帧是什么 API / 驱动 / 概览 | `get_capture_info` 或 `get_current_frame` | Both（名称不同） | 面板：`get_current_frame` |
 | Event Browser / 事件树 / drawcall 列表 | `list_actions(drawcalls_only=true)` | Both | `max_depth` 控制层级；默认可只取 draw/dispatch |

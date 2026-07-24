@@ -85,8 +85,10 @@ codebuddy --serve --port 8080
 
 #### 方案 2：Cursor sidecar（CodeBuddy 没额度时）
 
-1. 申请 API Key：Cursor Dashboard → 左侧 **API Keys** → 创建并复制  
-   https://cursor.com/dashboard/integrations （再点侧栏 **API Keys**）
+1. 申请 **Cloud Agents User API Key**（格式 `crsr_...`）：  
+   https://cursor.com/dashboard?tab=cloud-agents → **My Settings** → **API Keys**  
+   或 https://cursor.com/dashboard/api  
+   （不要用 GitHub / Integrations 里的其它令牌）
 2. 安装依赖（首次）：
 
 ```bat
@@ -121,8 +123,8 @@ start_cursor_sidecar.bat
 1. 重启 Cursor，或到 **Settings → MCP** 刷新
 2. 确认 `renderdoc` 服务在线
 3. 在对话里可调用例如：
-   - `list_hot_questions`
-   - `run_question`
+   - `analyze_question`（自然语言 → 自动调 RenderDoc 工具并出本地报告）
+   - `list_hot_questions` / `run_question`
    - `load_capture` / `fetch_counters` 等
 
 说明：本仓库的 `renderdoc.pyd` 按 **Python 3.6** 构建；MCP 进程用 3.12 可启动并列出工具，完整 replay 需要匹配的 Python 版本或改编到 3.12。
@@ -152,11 +154,18 @@ start_cursor_sidecar.bat
 **复制命令后终端报错找不到模块**  
 在仓库根目录执行 Cursor sidecar；并确认已 `pip install httpx starlette uvicorn`。
 
-**Cursor sidecar 提示没有 CURSOR_API_KEY / Invalid User API Key (401)**  
-1. 打开 https://cursor.com/dashboard/integrations → **API Keys** → 新建 User API Key  
-2. 关掉旧 sidecar，重新跑一次 `set_cursor_api_key.bat`（会重写 `.cursor_api_key`，去掉以前 `echo` 留下的尾部空格）  
-3. 再 `start_cursor_sidecar.bat`；启动日志里的 `api_key=xxxx...yyyy (len=N)` 可核对长度是否正常  
-不要用 GitHub / Integrations 里其它令牌冒充 API Key。
+**Cursor sidecar 提示 Invalid User API Key (401)**  
+Key 必须从 **Cloud Agents** 页面创建：  
+https://cursor.com/dashboard?tab=cloud-agents → **My Settings** → **API Keys**  
+（很多人在 Integrations / Team Settings 建的 key 会对 `/v1/agents` 返回 401。）  
+然后：`set_cursor_api_key.bat` → `start_cursor_sidecar.bat`。  
+启动时应看到 `api_key OK via /v1/me`；若仍 WARNING，换上述页面新建的 key。
+
+**Cursor sidecar 提示 The read operation timed out**  
+新 key 已通过鉴权，但云端创建 agent 较慢。已把超时加长；重启 sidecar 后请多等 1–3 分钟。若持续超时，检查能否访问 `api.cursor.com`，以及账号是否开通 Cloud Agents。
+
+**面板 Cursor 回复很慢**  
+首条消息仍要创建云端 Agent（较慢）。**同一会话里后续消息会复用 Agent + SSE 流式输出**，会快很多。请重启 sidecar 后「重新连接」，不要每句都断开重连。
 
 **Cursor sidecar 报 WinError 10038 / 非套接字**  
 本地 `cursor-sdk` Bridge 在 Windows 上会踩 `select()` 坑。当前 sidecar 已改为 **Cloud Agents HTTP**（`api.cursor.com`）。请**完全关掉**旧的 sidecar 窗口后重新运行 `start_cursor_sidecar.bat`，再在面板点「重新连接」。首条回复可能要等几十秒（云端创建 agent + 跑完）。

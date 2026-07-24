@@ -35,6 +35,152 @@ def _enum(value):
     return str(value)
 
 
+def _counter_int(c):
+    """GPUCounter may stringify as a name or as a bare int — always use int id."""
+    try:
+        return int(c)
+    except Exception:
+        pass
+    try:
+        return int(getattr(c, "value", c))
+    except Exception:
+        s = str(c)
+        # e.g. "GPUCounter.EventGPUDuration" / "<GPUCounter.EventGPUDuration: 1>"
+        if ":" in s:
+            try:
+                return int(s.rsplit(":", 1)[-1].strip(" >"))
+            except Exception:
+                pass
+        try:
+            return int(s.split(".")[-1])
+        except Exception:
+            return None
+
+
+def _counter_label(c, desc=None):
+    """Human label for logs: EventGPUDuration (1) when possible."""
+    cid = _counter_int(c)
+    name = None
+    if desc is not None:
+        name = getattr(desc, "name", None) or None
+    if not name:
+        try:
+            # Prefer enum member name when binding exposes it.
+            for attr in dir(rd.GPUCounter):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    if _counter_int(getattr(rd.GPUCounter, attr)) == cid:
+                        name = attr
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    if name and cid is not None:
+        return "%s (%s)" % (name, cid)
+    if name:
+        return str(name)
+    return str(cid if cid is not None else c)
+
+
+def _index_counters(controller):
+    """Map many keys → GPUCounter for robust lookup on Py bindings."""
+    available = list(controller.EnumerateCounters())
+    by_key = {}
+    meta = []
+    for c in available:
+        desc = controller.DescribeCounter(c)
+        cid = _counter_int(c)
+        short_enum = _enum(c).split(".")[-1]
+        label_name = getattr(desc, "name", "") or ""
+        row = {
+            "counter": c,
+            "id": cid,
+            "enum": short_enum,
+            "name": label_name,
+            "description": getattr(desc, "description", "") or "",
+            "unit": _enum(desc.unit),
+            "label": _counter_label(c, desc),
+        }
+        meta.append(row)
+        for key in (short_enum, _enum(c), label_name, str(cid) if cid is not None else None):
+            if key:
+                by_key[str(key)] = c
+                by_key[str(key).lower()] = c
+        if cid is not None:
+            by_key[cid] = c
+        # Also index known enum member names that share this int id.
+        try:
+            for attr in dir(rd.GPUCounter):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    if _counter_int(getattr(rd.GPUCounter, attr)) == cid:
+                        by_key[attr] = c
+                        by_key[attr.lower()] = c
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return available, by_key, meta
+
+
+def _resolve_counter(name, by_key, meta, available):
+    """Resolve a user/playbook counter name to a GPUCounter on this capture."""
+    aliases = {
+        "GPUDuration": "EventGPUDuration",
+        "Duration": "EventGPUDuration",
+        "EventDuration": "EventGPUDuration",
+        "gpu_duration": "EventGPUDuration",
+    }
+    key = str(name).split(".")[-1]
+    key = aliases.get(key, key)
+
+    # Direct map (name / id / enum string).
+    c = by_key.get(key)
+    if c is None:
+        c = by_key.get(key.lower())
+    if c is None:
+        try:
+            c = by_key.get(int(key))
+        except Exception:
+            pass
+
+    # Enum attribute → match by numeric id against EnumerateCounters().
+    if c is None:
+        try:
+            cand = getattr(rd.GPUCounter, key)
+            cid = _counter_int(cand)
+            if cid is not None:
+                c = by_key.get(cid)
+            if c is None and not available:
+                c = cand
+        except AttributeError:
+            pass
+
+    # Substring match on DescribeCounter().name / enum label.
+    if c is None:
+        kl = key.lower()
+        for row in meta:
+            hay = "%s %s %s" % (row.get("name") or "", row.get("enum") or "",
+                                row.get("description") or "")
+            if kl and kl in hay.lower():
+                c = row["counter"]
+                break
+
+    # Duration aliases: if EventGPUDuration (=1) is present, use it.
+    if c is None and key in ("EventGPUDuration", "GPUDuration", "Duration"):
+        c = by_key.get(1)
+        if c is None:
+            try:
+                c = by_key.get(_counter_int(rd.GPUCounter.EventGPUDuration))
+            except Exception:
+                pass
+
+    return c
+
+
 def _stage_enum(name):
     try:
         return getattr(rd.ShaderStage, name)
@@ -389,12 +535,18 @@ class LiveFrame(object):
         self._require_loaded()
 
         def fn(controller):
+            _available, _by_key, meta = _index_counters(controller)
             out = []
-            for c in controller.EnumerateCounters():
+            for row in meta:
+                c = row["counter"]
                 desc = controller.DescribeCounter(c)
                 out.append({
-                    "counter": _enum(c), "name": desc.name, "description": desc.description,
-                    "unit": _enum(desc.unit), "resultType": _enum(desc.resultType),
+                    "counter": row["label"],
+                    "id": row["id"],
+                    "name": desc.name,
+                    "description": desc.description,
+                    "unit": _enum(desc.unit),
+                    "resultType": _enum(desc.resultType),
                     "resultByteWidth": int(desc.resultByteWidth),
                 })
             return out
@@ -404,30 +556,37 @@ class LiveFrame(object):
     def pick_duration_counter(self, args):
         """Return the best available GPU duration counter for this capture.
 
-        RenderDoc's enum is ``EventGPUDuration`` (not ``GPUDuration``). Some
-        APIs/drivers expose none; then we report available counters.
+        RenderDoc's enum is ``EventGPUDuration`` (=1). Some Python bindings
+        stringify counters as bare ints, so we match by id/name robustly.
         """
         self._require_loaded()
 
         def fn(controller):
-            available = []
-            for c in controller.EnumerateCounters():
-                desc = controller.DescribeCounter(c)
-                available.append({
-                    "counter": _enum(c),
-                    "short": _enum(c).split(".")[-1],
-                    "name": desc.name,
-                    "description": desc.description,
-                    "unit": _enum(desc.unit),
-                })
-            # Prefer EventGPUDuration; accept common aliases / name matches.
+            _available, by_key, meta = _index_counters(controller)
+            available = [{
+                "counter": row["label"],
+                "id": row["id"],
+                "short": row["enum"],
+                "name": row["name"],
+                "description": row["description"],
+                "unit": row["unit"],
+            } for row in meta]
             preferred = ("EventGPUDuration", "GPUDuration", "Duration")
             chosen = None
             for short in preferred:
-                for row in available:
-                    if row["short"] == short or short in row["short"] or short in (row["name"] or ""):
-                        chosen = row
-                        break
+                c = _resolve_counter(short, by_key, meta, _available)
+                if c is not None:
+                    for row in meta:
+                        if row["counter"] == c or row["id"] == _counter_int(c):
+                            chosen = {
+                                "counter": row["label"],
+                                "id": row["id"],
+                                "short": "EventGPUDuration" if row["id"] == 1 else row["enum"],
+                                "name": row["name"],
+                                "description": row["description"],
+                                "unit": row["unit"],
+                            }
+                            break
                 if chosen is not None:
                     break
             return {"chosen": chosen, "available": available}
@@ -440,50 +599,19 @@ class LiveFrame(object):
         event_ids = args.get("event_ids")
 
         def fn(controller):
-            available = list(controller.EnumerateCounters())
-            avail_by_short = {}
-            for c in available:
-                short = _enum(c).split(".")[-1]
-                avail_by_short[short] = c
-                avail_by_short[_enum(c)] = c
-
-            # Friendly aliases used in docs / older prompts.
-            aliases = {
-                "GPUDuration": "EventGPUDuration",
-                "Duration": "EventGPUDuration",
-                "EventDuration": "EventGPUDuration",
-            }
+            available, by_key, meta = _index_counters(controller)
+            wanted_names = list(counters) if counters else ["EventGPUDuration"]
 
             counter_enums = []
-            for name in counters:
-                key = str(name).split(".")[-1]
-                key = aliases.get(key, key)
-                c = avail_by_short.get(key)
-                if c is None:
-                    try:
-                        cand = getattr(rd.GPUCounter, key)
-                        # Only use enum if this capture actually exposes it
-                        # (or EnumerateCounters returned empty — rare).
-                        if not available or avail_by_short.get(
-                                _enum(cand).split(".")[-1]) is not None:
-                            c = avail_by_short.get(
-                                _enum(cand).split(".")[-1], cand if not available else None)
-                    except AttributeError:
-                        c = None
-                if c is None:
-                    for short, enum_c in list(avail_by_short.items()):
-                        if "." in short:
-                            continue
-                        if key.lower() in short.lower():
-                            c = enum_c
-                            break
+            for name in wanted_names:
+                c = _resolve_counter(name, by_key, meta, available)
                 if c is None:
                     avail_names = sorted(set(
-                        _enum(x).split(".")[-1] for x in available))
+                        row["label"] for row in meta)) or ["(none)"]
                     raise RuntimeError(
                         "Unknown or unavailable counter '%s'. "
                         "Available on this capture: %s" % (
-                            name, ", ".join(avail_names) or "(none)"))
+                            name, ", ".join(avail_names)))
                 if c not in counter_enums:
                     counter_enums.append(c)
 
@@ -496,7 +624,14 @@ class LiveFrame(object):
             for r in results:
                 if wanted is not None and int(r.eventId) not in wanted:
                     continue
+                # CounterResult.counter may be int; match desc by id.
                 desc = descs.get(r.counter)
+                if desc is None:
+                    rid = _counter_int(r.counter)
+                    for c, d in descs.items():
+                        if _counter_int(c) == rid:
+                            desc = d
+                            break
                 if desc is not None and desc.resultType == rd.CompType.Float:
                     value = float(r.value.d) if desc.resultByteWidth == 8 else float(r.value.f)
                 elif desc is not None and desc.resultByteWidth == 8:
@@ -505,7 +640,7 @@ class LiveFrame(object):
                     value = int(r.value.u32)
                 out.append({
                     "eventId": int(r.eventId),
-                    "counter": _enum(r.counter),
+                    "counter": _counter_label(r.counter, desc),
                     "value": value,
                 })
             return out

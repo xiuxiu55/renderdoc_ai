@@ -137,14 +137,15 @@ GPU counters:
 - `list_counters()`
 - `fetch_counters(counters, event_ids?)`
 
-Hot-question playbook (local analysis, no LLM):
+Auto analysis + hot-question playbook (local, no LLM required):
 
+- `analyze_question(text, params?)` — natural language → Intent→Plan→Execute → report
 - `list_hot_questions(tag?)` — catalog from `playbook/questions.json`
 - `describe_hot_question(question_id)` — collect steps / followups
-- `run_question(question_id, params?)` — collect + rule-based report
+- `run_question(question_id, params?)` — collect + rule-based report for a known id
 
-Prefer `run_question` for common intents (GPU timing, drawcalls, pipeline, sync).
-Add new questions in `playbook/questions.json`; see [`capabilities.md`](capabilities.md).
+Prefer `analyze_question` for free-form questions; `run_question` when you know the id.
+Shared logic lives in `orchestrator/` + `playbook/`; see [`capabilities.md`](capabilities.md).
 
 `stage` is one of `Vertex`, `Hull`, `Domain`, `Geometry`, `Pixel`, `Compute`.
 

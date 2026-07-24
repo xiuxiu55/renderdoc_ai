@@ -83,10 +83,17 @@ def analyze_timing_topn(bag, params):
             ranked.append((val, eid, names.get(eid, "")))
     ranked.sort(reverse=True)
 
+    counter_label = "EventGPUDuration"
+    if isinstance(counters, list):
+        for row in counters:
+            if isinstance(row, dict) and row.get("counter"):
+                counter_label = str(row.get("counter"))
+                break
+
     lines = [
         "【GPU 耗时 Top-%d】" % top_n,
         "绘制事件数(含名称): %d；计数器样本数: %d" % (len(names), len(ranked)),
-        "计数器: EventGPUDuration（已换算为 ms）",
+        "计数器: %s（已换算为 ms）" % counter_label,
         "",
         "Top %d 最耗时事件:" % top_n,
     ]
@@ -342,6 +349,81 @@ def analyze_capture_info(bag, params):
     return "\n".join(lines)
 
 
+def analyze_shader_brief(bag, params):
+    """Pipeline + disassembly (+ optional reflection) for a stage."""
+    stage = params.get("stage") or "Pixel"
+    lines = ["【着色器分析】stage=%s" % stage]
+    pipe = _loads(bag.get("get_pipeline_state"), None)
+    if isinstance(pipe, dict) and not pipe.get("error"):
+        lines += ["", "管线摘要（截断）:", _cap(json.dumps(pipe, ensure_ascii=False, indent=2), 3500)]
+    elif isinstance(pipe, dict) and pipe.get("error"):
+        lines.append("管线: %s" % pipe.get("error"))
+
+    disasm_part = analyze_ps_disasm(bag, params)
+    # Retitle if not Pixel
+    if stage != "Pixel":
+        disasm_part = disasm_part.replace("【PS 反汇编摘要】", "【%s 反汇编摘要】" % stage)
+    lines += ["", disasm_part]
+
+    refl = _loads(bag.get("get_shader_reflection"), None)
+    if isinstance(refl, dict) and not refl.get("error"):
+        lines += ["", "【反射】", _cap(json.dumps(refl, ensure_ascii=False, indent=2), 3500)]
+    elif isinstance(refl, dict) and refl.get("error"):
+        lines.append("反射: %s" % refl.get("error"))
+    return "\n".join(lines)
+
+
+def analyze_event_brief(bag, params):
+    eid = params.get("event_id")
+    lines = ["【事件详情】"]
+    if eid is not None:
+        lines.append("目标 EID: %s" % eid)
+    action = _loads(bag.get("get_action"), None)
+    if isinstance(action, dict) and not action.get("error"):
+        lines += ["", "Action:", _cap(json.dumps(action, ensure_ascii=False, indent=2), 4000)]
+    elif isinstance(action, dict):
+        lines.append("Action: %s" % action.get("error"))
+    else:
+        lines.append("Action: (无数据)")
+
+    chunk = _loads(bag.get("get_event_chunk"), None)
+    if isinstance(chunk, dict) and not chunk.get("error"):
+        lines += ["", "API Chunk:", _cap(json.dumps(chunk, ensure_ascii=False, indent=2), 4000)]
+    elif isinstance(chunk, dict) and chunk.get("error"):
+        lines.append("Chunk: %s" % chunk.get("error"))
+
+    pipe = _loads(bag.get("get_pipeline_state"), None)
+    if isinstance(pipe, dict) and not pipe.get("error"):
+        lines += ["", "管线（截断）:", _cap(json.dumps(pipe, ensure_ascii=False, indent=2), 3000)]
+
+    lines += [
+        "",
+        "【本地解读】对照 Action 名与 chunk 参数，确认绑定资源/拓扑；"
+        "性能问题再叠 GPU 耗时 Top-N。",
+    ]
+    return "\n".join(lines)
+
+
+def analyze_why_slow(bag, params):
+    """Combine timing top-N with pipeline/shader for the hottest event."""
+    parts = [analyze_timing_topn(bag, params)]
+    pipe = bag.get("get_pipeline_state")
+    disasm = bag.get("get_shader_disassembly")
+    if pipe or disasm:
+        parts.append("")
+        parts.append("—— 热点事件深挖 ——")
+        if pipe:
+            parts.append(analyze_pipeline_check({"get_pipeline_state": pipe}, params))
+        if disasm:
+            parts.append(analyze_ps_disasm({"get_shader_disassembly": disasm}, params))
+    parts += [
+        "",
+        "【本地解读】先看耗时 Top1 EID，再核对其 PS/RT/混合；"
+        "若需自然语言解释，把本报告交给对话模型并追问原因。",
+    ]
+    return "\n".join(parts)
+
+
 ANALYZERS = {
     "timing_topn": analyze_timing_topn,
     "frame_overview": analyze_frame_overview,
@@ -351,4 +433,7 @@ ANALYZERS = {
     "sync_stall": analyze_sync_stall,
     "texture_overview": analyze_texture_overview,
     "capture_info": analyze_capture_info,
+    "shader_brief": analyze_shader_brief,
+    "event_brief": analyze_event_brief,
+    "why_slow": analyze_why_slow,
 }

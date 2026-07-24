@@ -12,8 +12,6 @@ Compatible surfaces:
 from __future__ import annotations
 
 import argparse
-import subprocess
-import sys
 import json
 import os
 import threading
@@ -27,6 +25,8 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+
+from renderdoc_mcp.cursor_sidecar.cloud_http import CloudAgentsClient, clean_text
 
 
 DEFAULT_MODEL = "composer-2.5"
@@ -42,13 +42,7 @@ def _jid() -> str:
 
 
 def _clean_text(s: str) -> str:
-    """Replace lone UTF-16 surrogates so UTF-8 encode / JSON never fail."""
-    if not s:
-        return ""
-    return "".join(
-        ch if not (0xD800 <= ord(ch) <= 0xDFFF) else "\ufffd"
-        for ch in s
-    )
+    return clean_text(s)
 
 
 def _sse(obj: dict) -> bytes:
@@ -79,15 +73,15 @@ class SessionState:
     cwd: str
     model: str
     mode: str = "bypassPermissions"
-    agent: Any = None
+    agent_id: Optional[str] = None  # reused Cloud Agent across turns
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class CursorBridge:
-    """All cursor-sdk calls are serialized on one worker thread.
+    """Cloud Agents HTTP bridge for the RenderDoc panel.
 
-    WinError 10038 (WSAENOTSOCK) is common on Windows when the local
-    cursor-bridge sockets are touched from multiple uvicorn/worker threads.
+    Pure HTTPS (httpx) — no local cursor-sdk Bridge, so Windows avoids
+    WinError 10038. Sessions reuse one cloud agent_id; replies stream via SSE.
     """
 
     def __init__(self, api_key: str, cwd: str, default_model: str = DEFAULT_MODEL):
@@ -97,94 +91,63 @@ class CursorBridge:
         self.connections: Dict[str, Dict[str, SessionState]] = {}
         self.runs: Dict[str, RunState] = {}
         self._models_cache: Optional[List[dict]] = None
-        self._sdk_lock = threading.Lock()  # serialize ALL sdk usage
+        self._cloud = CloudAgentsClient(api_key)
+        self._ask_lock = threading.Lock()  # one cloud run at a time per sidecar
 
     # -- models -----------------------------------------------------------
 
     def list_models(self) -> List[dict]:
         if self._models_cache is not None:
             return self._models_cache
-        # Avoid Cursor.models.list() in the uvicorn process — on Windows it can
-        # launch the local Bridge and hit WinError 10038 during select().
-        out = [
-            {"modelId": DEFAULT_MODEL, "name": DEFAULT_MODEL,
-             "description": "Default Cursor model"},
-            {"modelId": "composer-2", "name": "composer-2",
-             "description": "Composer 2"},
-            {"modelId": "auto", "name": "auto", "description": "Server-selected"},
-        ]
+        # Live catalog for this API key (GET /v1/models); falls back if offline.
+        out = self._cloud.list_models()
+        if not out:
+            out = [
+                {"modelId": DEFAULT_MODEL, "name": DEFAULT_MODEL,
+                 "description": "Default Cursor model"},
+                {"modelId": "auto", "name": "Auto", "description": "Server-selected"},
+            ]
         self._models_cache = out
         return out
 
     # -- agent ------------------------------------------------------------
 
-    def _prompt_subprocess(self, text: str, model: str, cwd: str) -> str:
-        """Run Cloud Agents HTTP via run_prompt.py (no local Bridge).
-
-        cursor-sdk Bridge.launch uses select() on stderr pipes; on Windows that
-        raises WinError 10038. The worker talks HTTPS to api.cursor.com instead.
-        """
-        worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_prompt.py")
-        env = os.environ.copy()
-        env["CURSOR_API_KEY"] = self.api_key
-        env["CURSOR_SIDECAR_MODEL"] = model or self.default_model
-        env["CURSOR_SIDECAR_CWD"] = cwd or self.cwd
-        # Avoid inheriting a broken asyncio selector state into the child.
-        env.pop("PYTHONASYNCIODEBUG", None)
-
-        text = _clean_text(text or "")
-        kwargs = dict(
-            args=[sys.executable, "-u", worker],
-            input=text.encode("utf-8", "replace"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd=cwd or self.cwd,
-            timeout=300,
-        )
-        if sys.platform == "win32":
-            # CREATE_NEW_PROCESS_GROUP | DETACHED-ish: don't share console select set
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-        with self._sdk_lock:
-            proc = subprocess.run(**kwargs)
-
-        stderr = (proc.stderr or b"").decode("utf-8", "replace")
-        stdout = (proc.stdout or b"").decode("utf-8", "replace").strip()
-        if stderr.strip():
-            print("[cursor_sidecar] worker stderr:\n%s" % stderr[-2000:])
-        if not stdout:
-            raise RuntimeError(
-                "Cursor worker produced no output (exit=%s). stderr=%s"
-                % (proc.returncode, stderr[-500:])
-            )
-        # worker prints one JSON line (possibly preceded by SDK noise) — take last {...}
-        line = stdout.splitlines()[-1]
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            # try find last json object
-            i = stdout.rfind("{")
-            if i < 0:
-                raise RuntimeError("Cursor worker bad output: %s" % stdout[-500:])
-            payload = json.loads(stdout[i:])
-
-        if not payload.get("ok"):
-            raise RuntimeError(_clean_text(payload.get("error") or "Cursor worker failed"))
-        return _clean_text(payload.get("text") or "")
-
     def ask(self, text: str, model: Optional[str] = None,
             cwd: Optional[str] = None,
             on_chunk: Optional[Callable[[str], None]] = None,
-            agent: Any = None) -> str:
-        """Ask Cursor via isolated subprocess (Windows-safe)."""
-        del agent
+            agent_id: Optional[str] = None,
+            sess: Optional[SessionState] = None) -> str:
+        """Ask via Cloud Agents; stream chunks; reuse sess.agent_id when set."""
+        del cwd  # cloud no-repo path does not use local cwd
         model = model or self.default_model
-        cwd = cwd or self.cwd
-        answer = self._prompt_subprocess(_clean_text(text or ""), model, cwd)
-        if answer and on_chunk:
+        text = _clean_text(text or "")
+        reuse = agent_id
+        if sess is not None:
+            with sess.lock:
+                reuse = sess.agent_id or agent_id
+
+        streamed: List[str] = []
+
+        def _wrapped(chunk: str) -> None:
+            if chunk:
+                streamed.append(chunk)
+            if on_chunk and chunk:
+                on_chunk(chunk)
+
+        with self._ask_lock:
+            answer, new_id = self._cloud.ask(
+                text,
+                model=model,
+                agent_id=reuse,
+                on_chunk=_wrapped if on_chunk else None,
+            )
+        if sess is not None and new_id:
+            with sess.lock:
+                sess.agent_id = new_id
+        # If SSE had no assistant deltas, still push the final text once.
+        if on_chunk and answer and not streamed:
             on_chunk(answer)
-        return answer or "(Cursor returned empty response)"
+        return answer
 
     # -- simple /runs API -------------------------------------------------
 
@@ -231,7 +194,7 @@ class CursorBridge:
             session_id=_jid(),
             cwd=cwd or self.cwd,
             model=model,
-            agent=None,  # never keep a live Agent; prompt is one-shot per message
+            agent_id=None,
         )
         self.connections.setdefault(connection_id, {})[sess.session_id] = sess
         return sess
@@ -244,7 +207,8 @@ class CursorBridge:
             return
         with sess.lock:
             sess.model = model_id
-            sess.agent = None
+            # Model change → next ask creates a fresh cloud agent.
+            sess.agent_id = None
 
 
 def build_app(bridge: CursorBridge) -> Starlette:
@@ -425,12 +389,13 @@ def build_app(bridge: CursorBridge) -> Starlette:
 
             def worker():
                 try:
+                    # Stream tokens as they arrive; reuse cloud agent after turn 1.
                     bridge.ask(
                         user_text,
                         model=sess.model,
                         cwd=sess.cwd,
                         on_chunk=on_chunk,
-                        agent=None,
+                        sess=sess,
                     )
                 except Exception as exc:  # noqa: BLE001
                     err_holder.append(str(exc))
@@ -466,7 +431,7 @@ def build_app(bridge: CursorBridge) -> Starlette:
                         yield queue.pop(0)
                     if done.is_set() and not queue:
                         break
-                    done.wait(0.05)
+                    done.wait(0.02)
 
             return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -528,8 +493,36 @@ def main(argv: Optional[List[str]] = None) -> None:
     print("Cursor sidecar listening on http://%s:%d" % (args.host, args.port))
     print("  cwd=%s  model=%s" % (args.cwd, args.model))
     print("  api_key=%s" % key_fp)
+
+    try:
+        code, info = bridge._cloud.probe_me()
+        if code == 200:
+            print(
+                "  api_key OK via /v1/me (name=%s)"
+                % (info.get("apiKeyName") or info.get("userEmail") or "ok")
+            )
+        else:
+            print("  WARNING: /v1/me HTTP %s — %s" % (code, str(info)[:200]))
+            print(
+                "  Get a Cloud Agents User API Key:\n"
+                "    https://cursor.com/dashboard?tab=cloud-agents\n"
+                "    → My Settings → API Keys  (or https://cursor.com/dashboard/api)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        print("  WARNING: could not probe /v1/me: %s" % exc)
+
+    try:
+        models = bridge.list_models()
+        print("  models: %d available (from /v1/models or fallback)" % len(models))
+        preview = ", ".join(m.get("name") or m.get("modelId") for m in models[:8])
+        if len(models) > 8:
+            preview += ", ..."
+        print("  e.g. %s" % preview)
+    except Exception as exc:  # noqa: BLE001
+        print("  WARNING: list_models failed: %s" % exc)
+
     print("  Panel: Window → AI 助手 → 重新连接 (port %d)" % args.port)
-    print("  Backend: Cloud Agents HTTP (avoids Windows WinError 10038 local Bridge)")
+    print("  Backend: Cloud Agents HTTP + SSE stream, agent reuse per session")
     print("  CodeBuddy unchanged — stop this process to use codebuddy --serve instead.")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info", workers=1)
 

@@ -47,6 +47,13 @@ except Exception:  # noqa: BLE001
     CallableBackend = None  # type: ignore
     _pb_format = _pb_list = _pb_match = _pb_run = None  # type: ignore
 
+try:
+    from orchestrator import answer as _orch_answer  # type: ignore
+    _HAS_ORCH = True
+except Exception:  # noqa: BLE001
+    _HAS_ORCH = False
+    _orch_answer = None  # type: ignore
+
 extiface_version = ""
 
 live = None          # type: LiveFrame
@@ -440,6 +447,14 @@ def _run_playbook_local(question_id, params=None):
     backend = CallableBackend(lambda tool, args: _run_rd_tool(tool, args))
     result = _pb_run(question_id, backend, params=params)
     return _pb_format(result)
+
+
+def _run_orchestrator_local(user_text, params=None):
+    """Intent→plan→execute via shared orchestrator (local tools first)."""
+    if not _HAS_ORCH or _orch_answer is None or CallableBackend is None:
+        return None
+    backend = CallableBackend(lambda tool, args: _run_rd_tool(tool, args))
+    return _orch_answer(user_text, backend, path="panel", params=params or {})
 
 
 def _gather_timing_bundle(top_n=30):
@@ -837,32 +852,47 @@ class Window(qrd.CaptureViewer):
 
         def worker():
             try:
-                # Prefer shared playbook match — local report, no model required.
-                matched = None
-                if _HAS_PLAYBOOK and prebuilt is None:
-                    matched = _pb_match(user_text or label or "", path="panel")
-                if matched is not None:
-                    reply = _run_playbook_local(matched["id"])
-                else:
-                    timing = (_is_timing_query(user_text) or _is_timing_query(label or "")
-                              or (prebuilt is not None and "GPUDuration" in (prebuilt or "")))
-                    drawcalls = (
-                        "drawcall" in (user_text or "").lower()
-                        or "drawcall" in (label or "").lower()
-                        or "绘制" in (user_text or "")
-                        or "绘制" in (label or "")
-                    )
-                    if timing:
-                        reply = self._answer_timing(
-                            user_text or label or "分析资源耗时",
-                            token, port, prebuilt=prebuilt)
-                    elif prebuilt is not None:
-                        reply = self._answer_local_first(
-                            label or user_text or "分析",
-                            user_text or label or "",
-                            prebuilt, token, port)
-                    elif drawcalls:
-                        reply = _run_playbook_local("drawcall_heavy")
+                reply = None
+                qtext = user_text or label or ""
+
+                # 1) Orchestrator: auto-call RenderDoc tools (playbook / rule plan).
+                if _HAS_ORCH and prebuilt is None:
+                    orch = _run_orchestrator_local(qtext)
+                    if orch is not None:
+                        reply = orch.get("text") or ""
+                        # Optional narrative layer when plan asks for LLM explain.
+                        if (orch.get("explain_with_llm")
+                                and orch.get("kind") not in ("chitchat", "gate_fail")
+                                and not token.cancelled()):
+                            evidence = _model_payload_from_local(reply, 6000)
+                            prompt = _analysis_prompt(
+                                "基于证据解读",
+                                qtext,
+                                evidence + "\n\n请只用以上证据解释原因与优化建议，不要编造未出现的数据。",
+                            )
+                            narrative = self._run_agent_or_local(
+                                prompt, token, port, evidence)
+                            if narrative and not _looks_like_refusal(narrative):
+                                reply = (
+                                    reply
+                                    + "\n\n【模型解读】\n"
+                                    + narrative
+                                )
+
+                # 2) Legacy prebuilt path (quick actions that still pass data).
+                if reply is None and prebuilt is not None:
+                    reply = self._answer_local_first(
+                        label or user_text or "分析",
+                        user_text or label or "",
+                        prebuilt, token, port)
+
+                # 3) Fallback: playbook match only / free chat with context.
+                if reply is None:
+                    matched = None
+                    if _HAS_PLAYBOOK:
+                        matched = _pb_match(qtext, path="panel")
+                    if matched is not None:
+                        reply = _run_playbook_local(matched["id"])
                     else:
                         if attach_context:
                             body = self._frame_context() + "\n\n用户问题：\n" + user_text
@@ -874,7 +904,7 @@ class Window(qrd.CaptureViewer):
                         reply = self._run_agent_or_local(
                             first_prompt, token, port, body)
                         if not reply:
-                            reply = "(CodeBuddy 没有返回文本内容)"
+                            reply = "(没有返回文本内容；可先试热门问题或检查抓帧是否已打开)"
 
                 def finish():
                     self.history_text = self._reply_base + reply + "\n\n"

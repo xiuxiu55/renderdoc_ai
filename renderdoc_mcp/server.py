@@ -14,7 +14,7 @@ the directory containing ``renderdoc.pyd`` / ``renderdoc.dll`` (or pass
 ``module_path`` to ``load_capture``). The Python running this server must match
 the Python version RenderDoc was built against.
 """
-
+# crsr_8280c549b12556e65e97da064a49cd3286c5282854390f0635e3b21b96db307b
 from __future__ import annotations
 
 import json
@@ -801,17 +801,43 @@ def fetch_counters(counters: list[str], event_ids: Optional[list[int]] = None) -
             "Duration": "EventGPUDuration",
             "EventDuration": "EventGPUDuration",
         }
+        available = list(controller.EnumerateCounters())
+        avail_ids = set()
+        for c in available:
+            try:
+                avail_ids.add(int(c))
+            except Exception:
+                try:
+                    avail_ids.add(int(getattr(c, "value", 0)))
+                except Exception:
+                    pass
+
         counter_enums = []
         for name in counters:
             key = str(name).split(".")[-1]
             key = aliases.get(key, key)
+            c = None
             try:
-                counter_enums.append(getattr(module.GPUCounter, key))
-            except AttributeError as exc:
+                c = getattr(module.GPUCounter, key)
+            except AttributeError:
+                c = None
+            if c is not None and available:
+                try:
+                    cid = int(c)
+                except Exception:
+                    cid = int(getattr(c, "value", -1))
+                if cid not in avail_ids:
+                    # Match by numeric id among EnumerateCounters results.
+                    c = next((x for x in available if int(x) == cid), None)
+            if c is None and key in ("EventGPUDuration", "GPUDuration", "Duration"):
+                c = next((x for x in available if int(x) == 1), None)
+            if c is None:
                 raise RenderDocError(
-                    f"Unknown counter '{name}'. Use list_counters for valid names "
-                    f"(duration counter is EventGPUDuration)."
-                ) from exc
+                    f"Unknown or unavailable counter '{name}'. "
+                    f"Use list_counters (duration is EventGPUDuration / id=1)."
+                )
+            if c not in counter_enums:
+                counter_enums.append(c)
 
         descs = {c: controller.DescribeCounter(c) for c in counter_enums}
         results = controller.FetchCounters(counter_enums)
@@ -982,6 +1008,41 @@ def run_question(question_id: str, params: Optional[dict] = None) -> str:
     result = _run(question_id, backend, params=params)
     payload = dict(result)
     payload["text"] = format_result(result)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def analyze_question(text: str, params: Optional[dict] = None) -> str:
+    """Auto-analyze a natural-language question about the loaded capture.
+
+    Routes intent → tool plan → RenderDoc APIs → local report (no LLM).
+    Prefer this for free-form questions; use ``run_question`` for known playbook ids.
+    Optional ``params`` may include ``event_id``, ``top_n``, ``explain_with_llm``.
+    """
+    try:
+        from renderdoc_mcp.playbook import CallableBackend  # type: ignore
+        from renderdoc_mcp.orchestrator import answer as _answer  # type: ignore
+    except ImportError:
+        from playbook import CallableBackend  # type: ignore
+        from orchestrator import answer as _answer  # type: ignore
+
+    backend = CallableBackend(_mcp_playbook_call)
+    result = _answer(text, backend, path="mcp", params=params or {})
+    # Compact JSON for MCP clients; ``text`` is the human-readable report.
+    payload = {
+        "kind": result.get("kind"),
+        "intent": result.get("intent"),
+        "question_id": result.get("question_id"),
+        "title": result.get("title"),
+        "analyze": result.get("analyze"),
+        "explain_with_llm": result.get("explain_with_llm"),
+        "slots": result.get("slots"),
+        "steps": result.get("steps"),
+        "errors": result.get("errors"),
+        "followups": result.get("followups"),
+        "text": result.get("text") or "",
+        "report": result.get("report"),
+    }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
