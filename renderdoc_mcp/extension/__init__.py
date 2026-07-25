@@ -164,6 +164,15 @@ RD_TOOL_SPECS = [
       "event_ids": "[int] 可选，只取这些事件"},
      "采样 GPU 计数器，得到每个事件的真实耗时——分析资源/绘制耗时就用它"),
     ("get_event_chunk", {"event_id": "int 必填"}, "某事件记录的 API 调用及其参数"),
+    ("get_resource_usage", {"resource_id": "str 必填"}, "资源读写时间线（谁写了 RT）"),
+    ("pick_pixel",
+     {"resource_id": "str", "x": "int", "y": "int", "event_id": "int 可选"},
+     "采样纹理某像素颜色"),
+    ("get_pixel_history",
+     {"resource_id": "str", "x": "int", "y": "int", "max_mods": "int 可选"},
+     "像素修改历史"),
+    ("get_debug_messages", {}, "回放/API 诊断消息"),
+    ("get_descriptor_access", {"event_id": "int 可选"}, "当前事件访问的描述符"),
 ]
 RD_TOOL_NAMES = frozenset(name for name, _args, _desc in RD_TOOL_SPECS)
 

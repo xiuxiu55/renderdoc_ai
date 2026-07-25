@@ -414,39 +414,187 @@
       "native": [],
       "summary": "Describe one playbook question",
       "keywords": []
+    },
+    {
+      "id": "get_resource_usage",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetUsage"
+      ],
+      "summary": "Resource read/write event timeline",
+      "keywords": [
+        "谁写了",
+        "usage",
+        "资源使用",
+        "读写"
+      ]
+    },
+    {
+      "id": "pick_pixel",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::PickPixel"
+      ],
+      "summary": "Sample one texel",
+      "keywords": [
+        "像素颜色",
+        "pick pixel",
+        "采样点"
+      ]
+    },
+    {
+      "id": "get_pixel_history",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::PixelHistory"
+      ],
+      "summary": "Per-pixel draw history",
+      "keywords": [
+        "pixel history",
+        "像素历史",
+        "谁画的"
+      ]
+    },
+    {
+      "id": "get_texture_minmax",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetMinMax"
+      ],
+      "summary": "Texture min/max values",
+      "keywords": [
+        "minmax",
+        "全黑",
+        "纹理范围"
+      ]
+    },
+    {
+      "id": "get_buffer_data",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetBufferData"
+      ],
+      "summary": "Raw buffer bytes (capped)",
+      "keywords": [
+        "buffer data",
+        "读缓冲",
+        "vb数据"
+      ]
+    },
+    {
+      "id": "get_debug_messages",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "session",
+      "native": [
+        "ReplayController::GetDebugMessages"
+      ],
+      "summary": "Replay/API debug messages",
+      "keywords": [
+        "debug message",
+        "校验",
+        "诊断消息"
+      ]
+    },
+    {
+      "id": "get_descriptor_access",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetDescriptorAccess"
+      ],
+      "summary": "Descriptors touched at event",
+      "keywords": [
+        "descriptor",
+        "描述符",
+        "绑定"
+      ]
+    },
+    {
+      "id": "list_descriptor_stores",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetDescriptorStores"
+      ],
+      "summary": "Descriptor heaps/sets",
+      "keywords": [
+        "descriptor store",
+        "heap"
+      ]
+    },
+    {
+      "id": "get_descriptors",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "ReplayController::GetDescriptors"
+      ],
+      "summary": "Descriptor contents in a store range",
+      "keywords": [
+        "get descriptors"
+      ]
+    },
+    {
+      "id": "get_post_vs_data",
+      "paths": [
+        "mcp"
+      ],
+      "category": "shader",
+      "native": [
+        "ReplayController::GetPostVSData"
+      ],
+      "summary": "Post-VS mesh buffer locations",
+      "keywords": [
+        "postvs",
+        "mesh output",
+        "vsout"
+      ]
+    },
+    {
+      "id": "debug_pixel",
+      "paths": [
+        "mcp"
+      ],
+      "category": "shader",
+      "native": [
+        "ReplayController::DebugPixel"
+      ],
+      "summary": "Pixel shader debug trace summary",
+      "keywords": [
+        "debug pixel",
+        "调试像素"
+      ]
     }
   ],
   "native_not_exposed": [
-    {
-      "api": "GetUsage",
-      "priority": "P1",
-      "why": "resource write/read timeline; useful for black-screen / who wrote RT"
-    },
-    {
-      "api": "PixelHistory",
-      "priority": "P1",
-      "why": "per-pixel draw history"
-    },
-    {
-      "api": "PickPixel / GetMinMax / GetHistogram",
-      "priority": "P2",
-      "why": "texture content stats"
-    },
-    {
-      "api": "GetBufferData / GetTextureData",
-      "priority": "P2",
-      "why": "raw dump"
-    },
-    {
-      "api": "DebugVertex / DebugPixel / DebugThread",
-      "priority": "P2",
-      "why": "shader debugger"
-    },
-    {
-      "api": "GetPostVSData",
-      "priority": "P2",
-      "why": "mesh after VS"
-    },
     {
       "api": "ReplaceResource / BuildTargetShader",
       "priority": "P3",
@@ -456,11 +604,6 @@
       "api": "CreateRGPProfile",
       "priority": "P3",
       "why": "AMD RGP export"
-    },
-    {
-      "api": "GetDescriptors / GetDescriptorAccess",
-      "priority": "P2",
-      "why": "bindless descriptors"
     }
   ],
   "intents": {
@@ -649,6 +792,19 @@
           {
             "tool": "list_textures",
             "args": {}
+          },
+          {
+            "tool": "get_resource_usage",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "pick_pixel",
+            "args": {
+              "x": 0,
+              "y": 0
+            },
+            "optional": true
           }
         ],
         "analyze": "pipeline_check",

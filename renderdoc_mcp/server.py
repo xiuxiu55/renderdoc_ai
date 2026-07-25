@@ -49,6 +49,10 @@ def _rd():
     return module
 
 
+# deep inspect tools registered after helpers below
+_DEEP_TOOLS_REGISTERED = False
+
+
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
@@ -111,6 +115,23 @@ def _action_summary(action: Any, names: Optional[dict] = None) -> dict:
     if depth:
         data["depthOutput"] = depth
     return data
+
+
+def _ensure_deep_tools() -> None:
+    global _DEEP_TOOLS_REGISTERED
+    if _DEEP_TOOLS_REGISTERED:
+        return
+    try:
+        from renderdoc_mcp.deep_inspect import register_deep_tools  # type: ignore
+    except ImportError:
+        from deep_inspect import register_deep_tools  # type: ignore
+    register_deep_tools(
+        mcp, session, RenderDocError, _rd, _rid, _enum, _resource_name_map
+    )
+    _DEEP_TOOLS_REGISTERED = True
+
+
+_ensure_deep_tools()
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +962,16 @@ def _mcp_playbook_call(tool: str, args: Optional[dict] = None) -> str:
         return get_status()
     if tool == "get_current_frame":
         return _playbook_get_current_frame()
+    try:
+        from renderdoc_mcp import deep_inspect as _deep  # type: ignore
+    except ImportError:
+        import deep_inspect as _deep  # type: ignore
+    fn = (_deep.DISPATCH or {}).get(tool)
+    if fn is not None:
+        import inspect
+        params = inspect.signature(fn).parameters
+        kwargs = {k: v for k, v in args.items() if k in params and v is not None}
+        return fn(**kwargs)
     raise RenderDocError("Playbook backend does not support tool '%s'" % tool)
 
 

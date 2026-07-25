@@ -683,3 +683,155 @@ class LiveFrame(object):
             return {"eventId": event_id, "apiCall": chunk.name, "parameters": params}
 
         return json.dumps(self.run(fn), indent=2)
+
+
+    def _find_resource_id(self, controller, resource_id):
+        wanted = str(resource_id).strip()
+        if not wanted.startswith("ResourceId::"):
+            wanted = "ResourceId::%s" % wanted
+        for res in controller.GetResources():
+            if str(res.resourceId) == wanted:
+                return res.resourceId
+        for tex in controller.GetTextures():
+            if str(tex.resourceId) == wanted:
+                return tex.resourceId
+        for buf in controller.GetBuffers():
+            if str(buf.resourceId) == wanted:
+                return buf.resourceId
+        raise RuntimeError("Resource id '%s' not found." % resource_id)
+
+    def get_resource_usage(self, args):
+        self._require_loaded()
+        resource_id = args["resource_id"]
+
+        def fn(controller):
+            resid = self._find_resource_id(controller, resource_id)
+            names = _resource_names(controller)
+            usages = []
+            for u in controller.GetUsage(resid):
+                usages.append({"eventId": int(u.eventId), "usage": _enum(u.usage)})
+            return {
+                "resourceId": str(resid),
+                "name": names.get(str(resid), ""),
+                "usages": usages,
+                "count": len(usages),
+            }
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def pick_pixel(self, args):
+        self._require_loaded()
+        resource_id = args["resource_id"]
+        x = int(args["x"])
+        y = int(args["y"])
+        event_id = args.get("event_id")
+        mip = int(args.get("mip") or 0)
+        slice_index = int(args.get("slice_index") or 0)
+        sample = int(args.get("sample") or 0)
+        type_cast = str(args.get("type_cast") or "Typeless")
+
+        def fn(controller):
+            if event_id is not None:
+                controller.SetFrameEvent(int(event_id), False)
+            resid = self._find_resource_id(controller, resource_id)
+            sub = rd.Subresource(mip, slice_index, sample)
+            cast = getattr(rd.CompType, type_cast)
+            val = controller.PickPixel(resid, x, y, sub, cast)
+            out = {"resourceId": str(resid), "x": x, "y": y, "value": {}}
+            try:
+                out["value"]["float"] = [float(v) for v in val.floatValue]
+            except Exception:
+                pass
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_pixel_history(self, args):
+        self._require_loaded()
+        resource_id = args["resource_id"]
+        x = int(args["x"])
+        y = int(args["y"])
+        event_id = args.get("event_id")
+        mip = int(args.get("mip") or 0)
+        slice_index = int(args.get("slice_index") or 0)
+        sample = int(args.get("sample") or 0)
+        type_cast = str(args.get("type_cast") or "Typeless")
+        max_mods = int(args.get("max_mods") or 100)
+
+        def fn(controller):
+            if event_id is not None:
+                controller.SetFrameEvent(int(event_id), False)
+            resid = self._find_resource_id(controller, resource_id)
+            sub = rd.Subresource(mip, slice_index, sample)
+            cast = getattr(rd.CompType, type_cast)
+            mods = list(controller.PixelHistory(resid, x, y, sub, cast))
+            shown = mods[: max(1, max_mods)]
+            out_mods = []
+            for m in shown:
+                item = {
+                    "eventId": int(m.eventId),
+                    "primitiveID": int(getattr(m, "primitiveID", 0)),
+                }
+                try:
+                    item["passed"] = bool(m.Passed())
+                except Exception:
+                    item["passed"] = None
+                try:
+                    item["postMod"] = {
+                        "col": {"float": [float(v) for v in m.postMod.col.floatValue]}
+                    }
+                except Exception:
+                    pass
+                out_mods.append(item)
+            return {
+                "resourceId": str(resid),
+                "x": x,
+                "y": y,
+                "totalMods": len(mods),
+                "returned": len(shown),
+                "truncated": len(mods) > len(shown),
+                "modifications": out_mods,
+            }
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_debug_messages(self, args):
+        self._require_loaded()
+
+        def fn(controller):
+            out = []
+            for msg in controller.GetDebugMessages():
+                out.append({
+                    "eventId": int(getattr(msg, "eventId", 0)),
+                    "category": _enum(getattr(msg, "category", "")),
+                    "severity": _enum(getattr(msg, "severity", "")),
+                    "description": str(getattr(msg, "description", "")),
+                })
+            return out
+
+        return json.dumps(self.run(fn), indent=2)
+
+    def get_descriptor_access(self, args):
+        self._require_loaded()
+        event_id = args.get("event_id")
+
+        def fn(controller):
+            if event_id is not None:
+                controller.SetFrameEvent(int(event_id), False)
+            access = []
+            for a in controller.GetDescriptorAccess():
+                access.append({
+                    "stage": _enum(getattr(a, "stage", "")),
+                    "type": _enum(getattr(a, "type", "")),
+                    "index": int(getattr(a, "index", 0)),
+                    "arrayElement": int(getattr(a, "arrayElement", 0)),
+                    "descriptorStore": _rid(getattr(a, "descriptorStore", None)),
+                    "byteOffset": int(getattr(a, "byteOffset", 0)),
+                })
+            return {
+                "eventId": int(event_id) if event_id is not None else None,
+                "access": access,
+                "count": len(access),
+            }
+
+        return json.dumps(self.run(fn), indent=2)
