@@ -2,6 +2,13 @@
 
 面向 AI / MCP：按**用户意图**选工具，而不是按 RenderDoc UI 菜单逐项映射。
 
+**机器可读总表（单一真相源）**：[`orchestrator/tools_catalog.json`](orchestrator/tools_catalog.json)  
+- `tools[]`：已暴露工具 + 路径（mcp/panel）+ 对应 native API + 关键词  
+- `intents{}`：意图 → 默认工具计划（本地快速调用，默认不走 Cloud LLM）  
+- `native_not_exposed[]`：ReplayController 尚未封装的接口与优先级  
+
+路由代码：`orchestrator/registry.py`（加载 catalog）→ `router.py`（关键词打分）→ `planner.py` → `executor.py`。
+
 两条路径能力不完全相同：
 
 | 路径 | 入口 | 抓帧来源 |
@@ -17,7 +24,8 @@
 
 | 用户意图（关键词示例） | 推荐调用顺序 | 可用路径 | 说明 |
 |------------------------|--------------|----------|------|
-| **任意自然语言分析问题** | MCP: `analyze_question(text)`；面板聊天自动走 orchestrator | Both | Intent→Plan→Execute→本地报告（见 `orchestrator/`） |
+| **任意自然语言分析问题** | MCP: `analyze_question(text)`；面板聊天自动走 orchestrator | Both | Intent→Plan→Execute→本地报告（见 `orchestrator/` + `tools_catalog.json`） |
+| 黑屏 / 没画面 / RT 不对 | `get_pipeline_state` → `list_textures` | Both | intent `black_screen`；后续可接 `GetUsage`/`PixelHistory` |
 | 有没有打开抓帧 / 当前在哪 | `get_status` → 可选 `get_capture_info` | MCP；面板用 `get_current_frame` | 面板没有 `get_status`，用当前帧概览代替 |
 | 这帧是什么 API / 驱动 / 概览 | `get_capture_info` 或 `get_current_frame` | Both（名称不同） | 面板：`get_current_frame` |
 | Event Browser / 事件树 / drawcall 列表 | `list_actions(drawcalls_only=true)` | Both | `max_depth` 控制层级；默认可只取 draw/dispatch |
@@ -157,21 +165,29 @@ list_textures(name_filter?) # 找候选 RT
 
 ## 5. 尚未封装（暂不支持自动调用）
 
-以下 RenderDoc 能力常见但当前 MCP/面板**没有**工具，遇到应如实说明，勿伪造结果：
+以下来自 `ReplayController` / replay API，常见但当前 MCP/面板**没有**工具（详见 catalog `native_not_exposed`）：
 
-- Pixel History / Debug Pixel
-- Mesh output / post-VS 数据
-- Buffer 内容 hex 读取（仅有 `list_buffers` 元数据）
-- Histogram / MinMax / 纹理采样点
-- 自定义 shader 可视化
-- 多帧对比、Capture 管理以外的 UI 操作
+| 优先级 | Native API | 用途 |
+|--------|------------|------|
+| P1 | `GetUsage` | 资源读写时间线（黑屏 / 谁写了 RT） |
+| P1 | `PixelHistory` | 逐像素绘制历史 |
+| P2 | `PickPixel` / `GetMinMax` / `GetHistogram` | 纹理内容统计 |
+| P2 | `GetBufferData` / `GetTextureData` | 原始数据 dump |
+| P2 | `DebugVertex` / `DebugPixel` / `DebugThread` | Shader debugger |
+| P2 | `GetPostVSData` | VS 后网格 |
+| P2 | `GetDescriptors` / `GetDescriptorAccess` | Bindless 描述符 |
+| P3 | `ReplaceResource` / `BuildTargetShader` | 改 shader 重放 |
+| P3 | `CreateRGPProfile` | AMD RGP 导出 |
 
-补接口时：先在本表「意图路由」加一行，再实现 `server.py` 与（如需）`live_frame.py`，并更新面板 `RD_TOOL_SPECS`。
+遇到上述能力应如实说明「尚未封装」，勿伪造结果。
+
+补接口时：先改 `tools_catalog.json`（tools + intents），再实现 `server.py` / `live_frame.py`，并更新本表与面板 `RD_TOOL_SPECS`。
 
 ---
 
 ## 6. 维护约定
 
-1. **新工具**：同步改 `server.py`（MCP）、`live_frame.py`（面板）、本表、面板 `RD_TOOL_SPECS`。
-2. **高频意图**：优先做本地预取（参考 GPU 耗时），不要只靠模型 invent 工具调用。
-3. **命名**：工具名保持稳定；用户口语写在「关键词示例」列，不改 API 名。
+1. **新工具**：先改 `orchestrator/tools_catalog.json`，再改 `server.py`（MCP）、`live_frame.py`（面板）、本表、面板 `RD_TOOL_SPECS`。
+2. **高频意图**：在 catalog `intents` 里写死 steps；默认 `explain_with_llm: false`，本地报告优先。
+3. **命名**：工具名保持稳定；用户口语写在 catalog `keywords`，不改 API 名。
+4. **扩展安装**：`extension/install.py` 会复制 `tools_catalog.json` 到扩展目录。

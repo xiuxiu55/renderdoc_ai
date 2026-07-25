@@ -32,6 +32,7 @@ PLAYBOOK_FILES = [
 ORCHESTRATOR_DIRNAME = "orchestrator"
 ORCHESTRATOR_FILES = [
     "__init__.py", "registry.py", "router.py", "planner.py", "executor.py", "pipeline.py",
+    "tools_catalog.json",
 ]
 
 

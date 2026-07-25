@@ -1,0 +1,968 @@
+{
+  "version": 1,
+  "description": "Single source of truth: RenderDoc APIs exposed via MCP/Panel + intent plans for fast local routing.",
+  "tools": [
+    {
+      "id": "load_capture",
+      "paths": [
+        "mcp"
+      ],
+      "category": "session",
+      "native": [
+        "CaptureFile::OpenFile",
+        "IReplayController open"
+      ],
+      "summary": "Open a .rdc capture",
+      "keywords": [
+        "打开",
+        "load",
+        "rdc",
+        "抓帧文件"
+      ]
+    },
+    {
+      "id": "close_capture",
+      "paths": [
+        "mcp"
+      ],
+      "category": "session",
+      "native": [
+        "IReplayController::Shutdown"
+      ],
+      "summary": "Close loaded capture",
+      "keywords": [
+        "关闭抓帧",
+        "close"
+      ]
+    },
+    {
+      "id": "get_status",
+      "paths": [
+        "mcp"
+      ],
+      "category": "session",
+      "native": [
+        "session state"
+      ],
+      "summary": "Whether capture loaded + current EID",
+      "keywords": [
+        "状态",
+        "有没有打开",
+        "status"
+      ]
+    },
+    {
+      "id": "get_capture_info",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "session",
+      "native": [
+        "GetAPIProperties",
+        "GetFrameInfo"
+      ],
+      "summary": "API/driver/frame metadata",
+      "keywords": [
+        "api",
+        "驱动",
+        "capture info",
+        "抓帧信息"
+      ]
+    },
+    {
+      "id": "get_current_frame",
+      "paths": [
+        "panel",
+        "mcp"
+      ],
+      "category": "session",
+      "native": [
+        "CurEvent",
+        "GetPipelineState",
+        "ActionDescription"
+      ],
+      "summary": "UI current event + pipeline summary",
+      "keywords": [
+        "当前帧",
+        "当前事件",
+        "概览"
+      ]
+    },
+    {
+      "id": "list_actions",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "event",
+      "native": [
+        "GetRootActions"
+      ],
+      "summary": "Event/drawcall tree",
+      "keywords": [
+        "drawcall",
+        "事件树",
+        "event browser",
+        "绘制"
+      ]
+    },
+    {
+      "id": "get_action",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "event",
+      "native": [
+        "ActionDescription"
+      ],
+      "summary": "Single action detail by EID",
+      "keywords": [
+        "action",
+        "这个draw",
+        "eid详情"
+      ]
+    },
+    {
+      "id": "set_event",
+      "paths": [
+        "mcp"
+      ],
+      "category": "event",
+      "native": [
+        "SetFrameEvent"
+      ],
+      "summary": "Move replay cursor",
+      "keywords": [
+        "跳转",
+        "set event",
+        "定位eid"
+      ]
+    },
+    {
+      "id": "get_event_chunk",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "event",
+      "native": [
+        "GetStructuredFile",
+        "SDChunk"
+      ],
+      "summary": "API call parameters for an event",
+      "keywords": [
+        "chunk",
+        "参数",
+        "api调用"
+      ]
+    },
+    {
+      "id": "list_counters",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "perf",
+      "native": [
+        "EnumerateCounters",
+        "DescribeCounter"
+      ],
+      "summary": "List available GPU counters",
+      "keywords": [
+        "计数器列表",
+        "list counters"
+      ]
+    },
+    {
+      "id": "pick_duration_counter",
+      "paths": [
+        "panel"
+      ],
+      "category": "perf",
+      "native": [
+        "EnumerateCounters"
+      ],
+      "summary": "Auto-pick EventGPUDuration-like counter",
+      "keywords": [
+        "选耗时计数器"
+      ]
+    },
+    {
+      "id": "fetch_counters",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "perf",
+      "native": [
+        "FetchCounters"
+      ],
+      "summary": "Sample counters (use EventGPUDuration for timing)",
+      "keywords": [
+        "耗时",
+        "性能",
+        "瓶颈",
+        "gpu duration",
+        "timing"
+      ]
+    },
+    {
+      "id": "get_pipeline_state",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "pipeline",
+      "native": [
+        "GetPipelineState",
+        "GetD3D11/12/GL/VKPipelineState"
+      ],
+      "summary": "Bound shaders, RTs, viewport, blend",
+      "keywords": [
+        "管线",
+        "pipeline",
+        "pso",
+        "rt",
+        "视口",
+        "blend"
+      ]
+    },
+    {
+      "id": "get_shader_disassembly",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "shader",
+      "native": [
+        "DisassembleShader",
+        "GetDisassemblyTargets"
+      ],
+      "summary": "Shader disassembly for a stage",
+      "keywords": [
+        "反汇编",
+        "disasm",
+        "ps",
+        "vs",
+        "cs",
+        "着色器"
+      ]
+    },
+    {
+      "id": "get_shader_reflection",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "shader",
+      "native": [
+        "GetShader",
+        "ShaderReflection"
+      ],
+      "summary": "Shader IO / resource bindings",
+      "keywords": [
+        "反射",
+        "reflection",
+        "绑定",
+        "signature"
+      ]
+    },
+    {
+      "id": "get_disassembly_targets",
+      "paths": [
+        "mcp"
+      ],
+      "category": "shader",
+      "native": [
+        "GetDisassemblyTargets"
+      ],
+      "summary": "Available disassembly formats",
+      "keywords": [
+        "反汇编格式"
+      ]
+    },
+    {
+      "id": "get_constant_buffer",
+      "paths": [
+        "mcp"
+      ],
+      "category": "shader",
+      "native": [
+        "GetCBufferVariableContents"
+      ],
+      "summary": "Read cbuffer contents",
+      "keywords": [
+        "cbuffer",
+        "常量缓冲",
+        "constant buffer",
+        "ubo"
+      ]
+    },
+    {
+      "id": "list_textures",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "GetTextures"
+      ],
+      "summary": "Texture list with size/format",
+      "keywords": [
+        "纹理",
+        "texture",
+        "分辨率",
+        "rendertarget"
+      ]
+    },
+    {
+      "id": "list_buffers",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "GetBuffers"
+      ],
+      "summary": "Buffer list",
+      "keywords": [
+        "buffer",
+        "缓冲",
+        "vb",
+        "ib"
+      ]
+    },
+    {
+      "id": "list_resources",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "resource",
+      "native": [
+        "GetResources"
+      ],
+      "summary": "All resources id/name/type (no timing)",
+      "keywords": [
+        "资源列表",
+        "resources"
+      ]
+    },
+    {
+      "id": "save_texture",
+      "paths": [
+        "mcp"
+      ],
+      "category": "resource",
+      "native": [
+        "SaveTexture"
+      ],
+      "summary": "Export texture to image file",
+      "keywords": [
+        "导出纹理",
+        "截图",
+        "save texture"
+      ]
+    },
+    {
+      "id": "analyze_question",
+      "paths": [
+        "mcp"
+      ],
+      "category": "meta",
+      "native": [],
+      "summary": "NL question -> orchestrator auto tool plan",
+      "keywords": [
+        "自动分析"
+      ]
+    },
+    {
+      "id": "run_question",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "meta",
+      "native": [],
+      "summary": "Run playbook question id",
+      "keywords": [
+        "热门问题"
+      ]
+    },
+    {
+      "id": "list_hot_questions",
+      "paths": [
+        "mcp",
+        "panel"
+      ],
+      "category": "meta",
+      "native": [],
+      "summary": "List playbook questions",
+      "keywords": [
+        "问题列表"
+      ]
+    },
+    {
+      "id": "describe_hot_question",
+      "paths": [
+        "mcp"
+      ],
+      "category": "meta",
+      "native": [],
+      "summary": "Describe one playbook question",
+      "keywords": []
+    }
+  ],
+  "native_not_exposed": [
+    {
+      "api": "GetUsage",
+      "priority": "P1",
+      "why": "resource write/read timeline; useful for black-screen / who wrote RT"
+    },
+    {
+      "api": "PixelHistory",
+      "priority": "P1",
+      "why": "per-pixel draw history"
+    },
+    {
+      "api": "PickPixel / GetMinMax / GetHistogram",
+      "priority": "P2",
+      "why": "texture content stats"
+    },
+    {
+      "api": "GetBufferData / GetTextureData",
+      "priority": "P2",
+      "why": "raw dump"
+    },
+    {
+      "api": "DebugVertex / DebugPixel / DebugThread",
+      "priority": "P2",
+      "why": "shader debugger"
+    },
+    {
+      "api": "GetPostVSData",
+      "priority": "P2",
+      "why": "mesh after VS"
+    },
+    {
+      "api": "ReplaceResource / BuildTargetShader",
+      "priority": "P3",
+      "why": "shader edit & replay"
+    },
+    {
+      "api": "CreateRGPProfile",
+      "priority": "P3",
+      "why": "AMD RGP export"
+    },
+    {
+      "api": "GetDescriptors / GetDescriptorAccess",
+      "priority": "P2",
+      "why": "bindless descriptors"
+    }
+  ],
+  "intents": {
+    "chitchat": {
+      "priority": 120,
+      "keywords": [
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "谢谢",
+        "thanks",
+        "再见",
+        "bye",
+        "你是什么模型",
+        "什么模型",
+        "模型名称",
+        "模型名字",
+        "哪个模型",
+        "你是谁",
+        "你叫什么",
+        "who are you",
+        "what model",
+        "model name",
+        "你会什么",
+        "你能做什么",
+        "怎么用",
+        "帮助",
+        "help"
+      ],
+      "plan": {
+        "steps": [],
+        "analyze": null,
+        "explain_with_llm": false
+      }
+    },
+    "timing": {
+      "priority": 100,
+      "keywords": [
+        "耗时",
+        "性能",
+        "瓶颈",
+        "卡顿",
+        "gpu",
+        "timing",
+        "duration",
+        "fps",
+        "最耗时",
+        "hotspot",
+        "慢不慢",
+        "太慢",
+        "很慢",
+        "性能分析",
+        "gpu耗时"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_actions",
+            "args": {
+              "drawcalls_only": true
+            }
+          },
+          {
+            "tool": "fetch_counters",
+            "args": {
+              "counters": [
+                "EventGPUDuration"
+              ]
+            }
+          }
+        ],
+        "analyze": "timing_topn",
+        "explain_with_llm": false,
+        "params": {
+          "top_n": 30,
+          "hot_pct": 5.0
+        }
+      }
+    },
+    "counters": {
+      "priority": 95,
+      "keywords": [
+        "有哪些计数器",
+        "list counter",
+        "计数器列表",
+        "enumerate counters"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_counters",
+            "args": {}
+          },
+          {
+            "tool": "fetch_counters",
+            "args": {
+              "counters": [
+                "EventGPUDuration"
+              ]
+            },
+            "optional": true
+          }
+        ],
+        "analyze": "timing_topn",
+        "explain_with_llm": false
+      }
+    },
+    "why_slow": {
+      "priority": 110,
+      "keywords": [
+        "为什么慢",
+        "为何慢",
+        "怎么这么慢",
+        "why slow",
+        "解释原因",
+        "为什么卡",
+        "这么慢",
+        "太慢了",
+        "为何这么",
+        "为什么这么",
+        "为什么这个",
+        "原因分析"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_actions",
+            "args": {
+              "drawcalls_only": true
+            }
+          },
+          {
+            "tool": "fetch_counters",
+            "args": {
+              "counters": [
+                "EventGPUDuration"
+              ]
+            }
+          },
+          {
+            "tool": "get_pipeline_state",
+            "args": {},
+            "optional": true,
+            "fill_event_from_timing_top1": true
+          },
+          {
+            "tool": "get_shader_disassembly",
+            "args": {
+              "stage": "Pixel"
+            },
+            "optional": true,
+            "fill_event_from_timing_top1": true
+          }
+        ],
+        "analyze": "why_slow",
+        "explain_with_llm": false,
+        "params": {
+          "top_n": 15,
+          "hot_pct": 5.0
+        }
+      }
+    },
+    "black_screen": {
+      "priority": 105,
+      "keywords": [
+        "黑屏",
+        "黑的",
+        "看不到",
+        "blank",
+        "black screen",
+        "rt不对",
+        "没画面"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_current_frame",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_pipeline_state",
+            "args": {}
+          },
+          {
+            "tool": "list_textures",
+            "args": {}
+          }
+        ],
+        "analyze": "pipeline_check",
+        "explain_with_llm": false
+      }
+    },
+    "pipeline": {
+      "priority": 90,
+      "keywords": [
+        "管线",
+        "pipeline",
+        "pso",
+        "viewport",
+        "视口",
+        "混合",
+        "blend",
+        "深度",
+        "depth",
+        "绑定"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_pipeline_state",
+            "args": {}
+          }
+        ],
+        "analyze": "pipeline_check",
+        "explain_with_llm": false
+      }
+    },
+    "shader": {
+      "priority": 90,
+      "keywords": [
+        "反汇编",
+        "disasm",
+        "shader",
+        "着色器",
+        "hlsl",
+        "spirv",
+        "ps",
+        "vs",
+        "cs",
+        "像素着色",
+        "顶点着色"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_pipeline_state",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_shader_disassembly",
+            "args": {
+              "stage": "Pixel"
+            }
+          },
+          {
+            "tool": "get_shader_reflection",
+            "args": {
+              "stage": "Pixel"
+            },
+            "optional": true
+          }
+        ],
+        "analyze": "shader_brief",
+        "explain_with_llm": false
+      }
+    },
+    "cbuffer": {
+      "priority": 88,
+      "keywords": [
+        "cbuffer",
+        "常量缓冲",
+        "constant buffer",
+        "ubo",
+        "uniform"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_pipeline_state",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_constant_buffer",
+            "args": {
+              "stage": "Pixel"
+            },
+            "optional": true
+          },
+          {
+            "tool": "get_shader_reflection",
+            "args": {
+              "stage": "Pixel"
+            },
+            "optional": true
+          }
+        ],
+        "analyze": "shader_brief",
+        "explain_with_llm": false
+      }
+    },
+    "texture": {
+      "priority": 85,
+      "keywords": [
+        "纹理",
+        "texture",
+        "rendertarget",
+        "rt",
+        "分辨率",
+        "贴图"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_textures",
+            "args": {}
+          },
+          {
+            "tool": "get_pipeline_state",
+            "args": {},
+            "optional": true
+          }
+        ],
+        "analyze": "texture_overview",
+        "explain_with_llm": false,
+        "params": {
+          "top_n": 20
+        }
+      }
+    },
+    "buffer": {
+      "priority": 80,
+      "keywords": [
+        "buffer",
+        "缓冲",
+        "vertex buffer",
+        "index buffer",
+        "vb",
+        "ib"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_buffers",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "list_resources",
+            "args": {},
+            "optional": true
+          }
+        ],
+        "analyze": "frame_overview",
+        "explain_with_llm": false
+      }
+    },
+    "event": {
+      "priority": 85,
+      "keywords": [
+        "这个事件",
+        "eid",
+        "event browser",
+        "chunk",
+        "api参数",
+        "当前选中"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_action",
+            "args": {}
+          },
+          {
+            "tool": "get_event_chunk",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_pipeline_state",
+            "args": {},
+            "optional": true
+          }
+        ],
+        "analyze": "event_brief",
+        "explain_with_llm": false
+      }
+    },
+    "drawcall": {
+      "priority": 80,
+      "keywords": [
+        "drawcall",
+        "绘制调用",
+        "draw call",
+        "dispatch",
+        "draw列表"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_actions",
+            "args": {
+              "drawcalls_only": true
+            }
+          }
+        ],
+        "analyze": "drawcall_summary",
+        "explain_with_llm": false,
+        "params": {
+          "top_n": 20
+        }
+      }
+    },
+    "sync": {
+      "priority": 85,
+      "keywords": [
+        "同步",
+        "barrier",
+        "fence",
+        "stall",
+        "等待gpu",
+        "glfinish",
+        "clientwaitsync"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "list_actions",
+            "args": {
+              "drawcalls_only": false
+            }
+          }
+        ],
+        "analyze": "sync_stall",
+        "explain_with_llm": false
+      }
+    },
+    "capture": {
+      "priority": 70,
+      "keywords": [
+        "抓帧信息",
+        "capture",
+        "api是什么",
+        "驱动",
+        "renderer",
+        "打开了吗"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_status",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_capture_info",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "get_current_frame",
+            "args": {},
+            "optional": true
+          }
+        ],
+        "analyze": "capture_info",
+        "explain_with_llm": false
+      }
+    },
+    "frame": {
+      "priority": 75,
+      "keywords": [
+        "当前帧",
+        "这一帧",
+        "在做什么",
+        "frame overview"
+      ],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_current_frame",
+            "args": {}
+          }
+        ],
+        "analyze": "frame_overview",
+        "explain_with_llm": false
+      }
+    },
+    "general": {
+      "priority": 1,
+      "keywords": [],
+      "plan": {
+        "steps": [
+          {
+            "tool": "get_current_frame",
+            "args": {},
+            "optional": true
+          },
+          {
+            "tool": "list_actions",
+            "args": {
+              "drawcalls_only": true
+            },
+            "optional": true
+          }
+        ],
+        "analyze": "frame_overview",
+        "explain_with_llm": false
+      }
+    }
+  }
+}

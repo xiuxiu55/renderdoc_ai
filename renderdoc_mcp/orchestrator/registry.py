@@ -1,165 +1,132 @@
-"""Tool catalog and intent -> default tool plans (capabilities.md as code).
+"""Tool catalog loader: tools_catalog.json is the single source of truth.
 
 Python 3.6 compatible.
 """
 
 from __future__ import print_function
 
-# Tools both Panel (live_frame) and MCP commonly support.
-COMMON_TOOLS = frozenset([
-    "list_actions",
-    "fetch_counters",
-    "list_counters",
-    "get_pipeline_state",
-    "get_shader_disassembly",
-    "get_shader_reflection",
-    "list_textures",
-    "list_resources",
-    "get_action",
-    "get_event_chunk",
-    "get_capture_info",
-    "get_current_frame",
-    "get_status",
-])
+import json
+import os
 
-MCP_ONLY_TOOLS = frozenset([
-    "load_capture",
-    "close_capture",
-    "set_event",
-    "list_buffers",
-    "save_texture",
-    "get_constant_buffer",
-    "get_disassembly_targets",
-])
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CATALOG_PATH = os.path.join(_HERE, "tools_catalog.json")
 
-# Intent class -> default plan (v1 rule planner).
-# Each step: tool, args, optional?, fill_from? (post-process hint)
-INTENT_PLANS = {
-    "capture": {
-        "steps": [
-            {"tool": "get_status", "args": {}, "optional": True},
-            {"tool": "get_capture_info", "args": {}, "optional": True},
-            {"tool": "get_current_frame", "args": {}, "optional": True},
-        ],
-        "analyze": "capture_info",
-        "explain_with_llm": False,
-    },
-    "timing": {
-        "steps": [
-            {"tool": "list_actions", "args": {"drawcalls_only": True}},
-            {"tool": "fetch_counters", "args": {"counters": ["EventGPUDuration"]}},
-        ],
-        "analyze": "timing_topn",
-        "explain_with_llm": False,
-        "params": {"top_n": 30, "hot_pct": 5.0},
-    },
-    "counters": {
-        "steps": [
-            {"tool": "list_counters", "args": {}},
-            {
-                "tool": "fetch_counters",
-                "args": {"counters": ["EventGPUDuration"]},
-                "optional": True,
-            },
-        ],
-        "analyze": "timing_topn",
-        "explain_with_llm": False,
-    },
-    "pipeline": {
-        "steps": [
-            {"tool": "get_pipeline_state", "args": {}},
-        ],
-        "analyze": "pipeline_check",
-        "explain_with_llm": False,
-    },
-    "shader": {
-        "steps": [
-            {"tool": "get_pipeline_state", "args": {}, "optional": True},
-            {"tool": "get_shader_disassembly", "args": {"stage": "Pixel"}},
-            {"tool": "get_shader_reflection", "args": {"stage": "Pixel"}, "optional": True},
-        ],
-        "analyze": "shader_brief",
-        "explain_with_llm": False,
-    },
-    "texture": {
-        "steps": [
-            {"tool": "list_textures", "args": {}},
-            {"tool": "get_pipeline_state", "args": {}, "optional": True},
-        ],
-        "analyze": "texture_overview",
-        "explain_with_llm": False,
-        "params": {"top_n": 20},
-    },
-    "event": {
-        "steps": [
-            {"tool": "get_action", "args": {}},
-            {"tool": "get_event_chunk", "args": {}, "optional": True},
-            {"tool": "get_pipeline_state", "args": {}, "optional": True},
-        ],
-        "analyze": "event_brief",
-        "explain_with_llm": False,
-    },
-    "drawcall": {
-        "steps": [
-            {"tool": "list_actions", "args": {"drawcalls_only": True}},
-        ],
-        "analyze": "drawcall_summary",
-        "explain_with_llm": False,
-        "params": {"top_n": 20},
-    },
-    "sync": {
-        "steps": [
-            {"tool": "list_actions", "args": {"drawcalls_only": False}},
-        ],
-        "analyze": "sync_stall",
-        "explain_with_llm": False,
-    },
-    "why_slow": {
-        # timing first, then inspect hottest event pipeline + PS
-        "steps": [
-            {"tool": "list_actions", "args": {"drawcalls_only": True}},
-            {"tool": "fetch_counters", "args": {"counters": ["EventGPUDuration"]}},
-            {
-                "tool": "get_pipeline_state",
-                "args": {},
-                "optional": True,
-                "fill_event_from_timing_top1": True,
-            },
-            {
-                "tool": "get_shader_disassembly",
-                "args": {"stage": "Pixel"},
-                "optional": True,
-                "fill_event_from_timing_top1": True,
-            },
-        ],
-        "analyze": "why_slow",
-        "explain_with_llm": True,
-        "params": {"top_n": 15, "hot_pct": 5.0},
-    },
-    "frame": {
-        "steps": [
-            {"tool": "get_current_frame", "args": {}},
-        ],
-        "analyze": "frame_overview",
-        "explain_with_llm": False,
-    },
-    "general": {
-        "steps": [
-            {"tool": "get_current_frame", "args": {}, "optional": True},
-            {"tool": "list_actions", "args": {"drawcalls_only": True}, "optional": True},
-        ],
-        "analyze": "frame_overview",
-        "explain_with_llm": True,
-    },
-}
+_CATALOG = None
+_TOOLS_BY_ID = None
+_INTENT_PLANS = None
+_INTENT_META = None
+_COMMON_TOOLS = None
+_MCP_ONLY_TOOLS = None
+_PANEL_TOOLS = None
+
+
+def _load_catalog():
+    global _CATALOG, _TOOLS_BY_ID, _INTENT_PLANS, _INTENT_META
+    global _COMMON_TOOLS, _MCP_ONLY_TOOLS, _PANEL_TOOLS
+    if _CATALOG is not None:
+        return _CATALOG
+    with open(_CATALOG_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    _CATALOG = data
+    by_id = {}
+    for t in data.get("tools") or []:
+        tid = t.get("id")
+        if tid:
+            by_id[tid] = t
+    _TOOLS_BY_ID = by_id
+
+    common = set()
+    mcp_only = set()
+    panel = set()
+    for tid, t in by_id.items():
+        paths = set(t.get("paths") or [])
+        if "panel" in paths:
+            panel.add(tid)
+        if "mcp" in paths and "panel" in paths:
+            common.add(tid)
+        elif "mcp" in paths:
+            mcp_only.add(tid)
+    _COMMON_TOOLS = frozenset(common)
+    _MCP_ONLY_TOOLS = frozenset(mcp_only)
+    _PANEL_TOOLS = frozenset(panel)
+
+    plans = {}
+    meta = {}
+    for name, spec in (data.get("intents") or {}).items():
+        plans[name] = dict(spec.get("plan") or {})
+        meta[name] = {
+            "priority": int(spec.get("priority") or 0),
+            "keywords": list(spec.get("keywords") or []),
+        }
+    _INTENT_PLANS = plans
+    _INTENT_META = meta
+    return _CATALOG
+
+
+def reload_catalog():
+    """Force reload (tests / hot-edit)."""
+    global _CATALOG, _TOOLS_BY_ID, _INTENT_PLANS, _INTENT_META
+    global _COMMON_TOOLS, _MCP_ONLY_TOOLS, _PANEL_TOOLS
+    _CATALOG = None
+    _TOOLS_BY_ID = None
+    _INTENT_PLANS = None
+    _INTENT_META = None
+    _COMMON_TOOLS = None
+    _MCP_ONLY_TOOLS = None
+    _PANEL_TOOLS = None
+    return _load_catalog()
+
+
+def get_catalog():
+    return _load_catalog()
+
+
+def list_tools(path=None):
+    """Return tool dicts, optionally filtered by path (mcp|panel)."""
+    _load_catalog()
+    out = []
+    for tid, t in _TOOLS_BY_ID.items():
+        paths = t.get("paths") or []
+        if path and path not in paths:
+            continue
+        out.append(t)
+    return out
+
+
+def tool_info(tool_id):
+    _load_catalog()
+    return _TOOLS_BY_ID.get(tool_id)
+
+
+def native_not_exposed():
+    _load_catalog()
+    return list((_CATALOG or {}).get("native_not_exposed") or [])
+
+
+def intent_meta():
+    _load_catalog()
+    return dict(_INTENT_META or {})
 
 
 def tools_for_path(path):
     """Return frozenset of tools allowed on this path."""
+    _load_catalog()
     if path == "mcp":
-        return COMMON_TOOLS | MCP_ONLY_TOOLS
-    return COMMON_TOOLS
+        return _COMMON_TOOLS | _MCP_ONLY_TOOLS
+    return _PANEL_TOOLS
 
 
 def get_intent_plan(intent):
-    return INTENT_PLANS.get(intent) or INTENT_PLANS["general"]
+    _load_catalog()
+    plans = _INTENT_PLANS or {}
+    return plans.get(intent) or plans.get("general") or {
+        "steps": [],
+        "analyze": None,
+        "explain_with_llm": False,
+    }
+
+
+_load_catalog()
+COMMON_TOOLS = _COMMON_TOOLS
+MCP_ONLY_TOOLS = _MCP_ONLY_TOOLS
+INTENT_PLANS = _INTENT_PLANS

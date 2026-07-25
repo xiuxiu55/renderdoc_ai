@@ -581,6 +581,9 @@ class Window(qrd.CaptureViewer):
         self.mqt.SetWidgetText(self.cancelBtn, "取消")
         self.mqt.SetWidgetEnabled(self.cancelBtn, False)
         self.mqt.AddWidget(actions, self.cancelBtn)
+        self.clearBtn = self.mqt.CreateButton(lambda c, w, d: self._clear_history())
+        self.mqt.SetWidgetText(self.clearBtn, "清空记录")
+        self.mqt.AddWidget(actions, self.clearBtn)
         modelLabel = self.mqt.CreateLabel()
         self.mqt.SetWidgetText(modelLabel, "   模型:")
         self.mqt.AddWidget(actions, modelLabel)
@@ -833,6 +836,24 @@ class Window(qrd.CaptureViewer):
                 self.acp.cancel()
         _spawn(worker)
 
+    def _clear_history(self):
+        """Clear the entire chat transcript shown in the panel."""
+        if self.busy:
+            self._set_status("请先取消当前请求，再清空记录")
+            return
+        self.history_text = ""
+        self._reply_base = ""
+        self._last_input = None
+        try:
+            self.mqt.SetWidgetText(self.history, "")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.mqt.SetWidgetText(self.input, "")
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_status("聊天记录已清空")
+
     def _send(self, user_text, attach_context=True, prebuilt=None, label=None):
         if self.busy:
             return
@@ -855,29 +876,51 @@ class Window(qrd.CaptureViewer):
                 reply = None
                 qtext = user_text or label or ""
 
-                # 1) Orchestrator: auto-call RenderDoc tools (playbook / rule plan).
+                # 1) Graphics → local MCP/orchestrator; otherwise → model.
                 if _HAS_ORCH and prebuilt is None:
-                    orch = _run_orchestrator_local(qtext)
+                    model_name = ""
+                    try:
+                        model_name = self.mqt.GetWidgetText(self.modelCombo) or ""
+                    except Exception:  # noqa: BLE001
+                        model_name = ""
+                    orch = _run_orchestrator_local(
+                        qtext, params={"model_name": model_name})
                     if orch is not None:
-                        reply = orch.get("text") or ""
-                        # Optional narrative layer when plan asks for LLM explain.
-                        if (orch.get("explain_with_llm")
-                                and orch.get("kind") not in ("chitchat", "gate_fail")
-                                and not token.cancelled()):
-                            evidence = _model_payload_from_local(reply, 6000)
-                            prompt = _analysis_prompt(
-                                "基于证据解读",
-                                qtext,
-                                evidence + "\n\n请只用以上证据解释原因与优化建议，不要编造未出现的数据。",
-                            )
-                            narrative = self._run_agent_or_local(
-                                prompt, token, port, evidence)
-                            if narrative and not _looks_like_refusal(narrative):
-                                reply = (
-                                    reply
-                                    + "\n\n【模型解读】\n"
-                                    + narrative
+                        kind = orch.get("kind")
+                        if kind == "model":
+                            # Non-graphics: let the selected model answer.
+                            first_prompt = _analysis_prompt(
+                                "自由问答", qtext, qtext)
+                            reply = self._run_agent_or_local(
+                                first_prompt, token, port, qtext)
+                            if not reply:
+                                reply = "(模型未返回内容；请确认 sidecar 已连接)"
+                        else:
+                            reply = orch.get("text") or ""
+                            # Optional narrative only when plan asks for it.
+                            if (orch.get("explain_with_llm")
+                                    and kind not in ("gate_fail", "playbook")
+                                    and not token.cancelled()):
+                                evidence = _model_payload_from_local(reply, 6000)
+                                prompt = _analysis_prompt(
+                                    "基于证据解读",
+                                    qtext,
+                                    evidence
+                                    + "\n\n请只用以上证据解释原因与优化建议，"
+                                    "不要编造未出现的数据。",
                                 )
+                                try:
+                                    narrative = self._run_agent_or_local(
+                                        prompt, token, port, evidence)
+                                except Exception as exc:  # noqa: BLE001
+                                    narrative = "(模型解读失败: %s)" % exc
+                                if narrative and not _looks_like_refusal(
+                                        narrative):
+                                    reply = (
+                                        reply
+                                        + "\n\n【模型解读】\n"
+                                        + narrative
+                                    )
 
                 # 2) Legacy prebuilt path (quick actions that still pass data).
                 if reply is None and prebuilt is not None:
@@ -886,7 +929,7 @@ class Window(qrd.CaptureViewer):
                         user_text or label or "",
                         prebuilt, token, port)
 
-                # 3) Fallback: playbook match only / free chat with context.
+                # 3) Fallback: playbook match / free chat.
                 if reply is None:
                     matched = None
                     if _HAS_PLAYBOOK:

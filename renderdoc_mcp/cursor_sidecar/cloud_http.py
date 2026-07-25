@@ -209,6 +209,15 @@ class CloudAgentsClient:
         terminal = ("FINISHED", "ERROR", "CANCELLED", "EXPIRED")
         deadline = time.monotonic() + timeout_s
 
+        def _stream_gone(msg):
+            m = (msg or "").lower()
+            return (
+                "no longer available" in m
+                or "stream_expired" in m
+                or "stream expired" in m
+                or "not available" in m
+            )
+
         try:
             with self._client.stream(
                 "GET",
@@ -216,60 +225,76 @@ class CloudAgentsClient:
                 headers=_auth_headers(self.api_key, self._scheme),
                 timeout=_STREAM_TIMEOUT,
             ) as resp:
-                if resp.status_code >= 400:
+                # 410 = retention elapsed; fall back to Get A Run.
+                if resp.status_code in (410, 404):
+                    print(
+                        "[cursor_sidecar] SSE HTTP %s — poll get_run instead"
+                        % resp.status_code
+                    )
+                elif resp.status_code >= 400:
                     raise RuntimeError(
                         "stream HTTP %s: %s" % (resp.status_code, resp.read()[:400])
                     )
-                event = "message"
-                data_buf = []
-                for line in resp.iter_lines():
-                    if time.monotonic() > deadline:
-                        break
-                    if line is None:
-                        continue
-                    if line.startswith("event:"):
-                        event = line[6:].strip() or "message"
-                        continue
-                    if line.startswith("data:"):
-                        data_buf.append(line[5:].lstrip())
-                        continue
-                    if line.strip() == "":
-                        if not data_buf:
-                            event = "message"
+                else:
+                    event = "message"
+                    data_buf = []
+                    for line in resp.iter_lines():
+                        if time.monotonic() > deadline:
+                            break
+                        if line is None:
                             continue
-                        raw = "\n".join(data_buf)
-                        data_buf = []
-                        try:
-                            payload = json.loads(raw) if raw else {}
-                        except ValueError:
-                            payload = {}
-                        if not isinstance(payload, dict):
-                            payload = {}
+                        if line.startswith("event:"):
+                            event = line[6:].strip() or "message"
+                            continue
+                        if line.startswith("data:"):
+                            data_buf.append(line[5:].lstrip())
+                            continue
+                        if line.strip() == "":
+                            if not data_buf:
+                                event = "message"
+                                continue
+                            raw = "\n".join(data_buf)
+                            data_buf = []
+                            try:
+                                payload = json.loads(raw) if raw else {}
+                            except ValueError:
+                                payload = {}
+                            if not isinstance(payload, dict):
+                                payload = {}
 
-                        if event == "assistant":
-                            t = clean_text(payload.get("text") or "")
-                            if t:
-                                parts.append(t)
-                                if on_chunk:
-                                    on_chunk(t)
-                        elif event == "result":
-                            status = (payload.get("status") or "").upper()
-                            text = clean_text(payload.get("text") or "".join(parts))
-                            if status and status != "FINISHED":
-                                raise RuntimeError(
-                                    "Cloud run %s: %s" % (status, text or payload)
+                            if event == "assistant":
+                                t = clean_text(payload.get("text") or "")
+                                if t:
+                                    parts.append(t)
+                                    if on_chunk:
+                                        on_chunk(t)
+                            elif event == "result":
+                                status = (payload.get("status") or "").upper()
+                                text = clean_text(
+                                    payload.get("text") or "".join(parts)
                                 )
-                            return text or "".join(parts)
-                        elif event == "error":
-                            raise RuntimeError(
-                                "stream error: %s"
-                                % (payload.get("message") or payload)
-                            )
-                        elif event == "done":
-                            return "".join(parts)
-                        event = "message"
-        except RuntimeError:
-            raise
+                                if status and status != "FINISHED":
+                                    raise RuntimeError(
+                                        "Cloud run %s: %s" % (status, text or payload)
+                                    )
+                                return text or "".join(parts)
+                            elif event == "error":
+                                msg = str(payload.get("message") or payload)
+                                if _stream_gone(msg):
+                                    print(
+                                        "[cursor_sidecar] SSE expired/unavailable "
+                                        "— poll get_run: %s" % msg
+                                    )
+                                    break
+                                raise RuntimeError("stream error: %s" % msg)
+                            elif event == "done":
+                                return "".join(parts)
+                            event = "message"
+        except RuntimeError as exc:
+            if _stream_gone(str(exc)):
+                print("[cursor_sidecar] SSE RuntimeError → poll: %s" % exc)
+            else:
+                raise
         except Exception as exc:
             print("[cursor_sidecar] SSE stream fallback to poll: %s" % exc)
 

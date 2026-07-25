@@ -6,6 +6,7 @@ Python 3.6 compatible.
 from __future__ import print_function
 
 import json
+import re
 
 from . import executor
 from . import planner
@@ -71,10 +72,49 @@ def _session_gate(backend, path="panel"):
     return True, "", info
 
 
+def _chitchat_text(question, params=None):
+    """Local canned reply for greetings / model identity — no tools, no LLM."""
+    params = params or {}
+    model = (params.get("model_name") or "").strip()
+    q = question or ""
+    about_model = bool(re.search(
+        r"模型|model|你是谁|你叫什么|who are you", q, re.I))
+
+    lines = []
+    if about_model:
+        lines.append("【本地说明】本回答不经过大模型。")
+        lines.append("")
+        lines.append(
+            "抓帧分析由面板内本地 orchestrator / playbook 完成："
+            "按问题匹配意图 → 调用 RenderDoc 接口 → 生成本地报告。"
+        )
+        if model:
+            lines.append(
+                "面板下拉当前选中的后端模型名：%s"
+                "（仅在显式开启「模型解读」时才会用到；默认分析不用它）。" % model
+            )
+        else:
+            lines.append(
+                "面板可连接 Cursor sidecar 选择模型，但默认分析路径不调用该模型。"
+            )
+        lines.append("")
+        lines.append(
+            "试试：「分析 GPU 耗时」「当前管线状态」「PS 反汇编」「为什么这个 draw 慢」。"
+        )
+    else:
+        lines.append("你好。我可以自动调用 RenderDoc 接口分析当前抓帧（本地工具，不经模型）。")
+        lines.append("试试：「分析 GPU 耗时」「当前管线状态」「PS 反汇编」「为什么这个 draw 慢」。")
+    return "\n".join(lines)
+
+
 def format_report(result):
     """Render orchestrator result as panel/MCP text."""
     if not result:
         return "(空结果)"
+    if result.get("kind") == "model":
+        return result.get("text") or (
+            "该问题与图形学/抓帧分析无关，请由对话模型回答。"
+        )
     if result.get("kind") == "chitchat":
         return result.get("text") or "你好，我可以帮你分析当前 RenderDoc 抓帧。"
     if result.get("kind") == "gate_fail":
@@ -133,6 +173,24 @@ def answer(question, backend, path="panel", params=None):
             "errors": ["empty_question"],
         }
 
+    # Route first: non-graphics → model; graphics → local MCP/playbook.
+    decision = router.route(text, path=path)
+    slots = dict(decision.get("slots") or {})
+    if params.get("event_id") is not None:
+        slots["event_id"] = int(params["event_id"])
+
+    if decision.get("kind") == "model":
+        return {
+            "kind": "model",
+            "domain": "other",
+            "text": "",
+            "intent": decision.get("intent") or "general",
+            "slots": slots,
+            "errors": [],
+            "explain_with_llm": True,
+            "followups": [],
+        }
+
     ok, gate_msg, _gate_info = _session_gate(backend, path=path)
     if not ok:
         return {
@@ -140,11 +198,6 @@ def answer(question, backend, path="panel", params=None):
             "text": gate_msg,
             "errors": ["no_capture"],
         }
-
-    decision = router.route(text, path=path)
-    slots = dict(decision.get("slots") or {})
-    if params.get("event_id") is not None:
-        slots["event_id"] = int(params["event_id"])
 
     # --- Playbook short-circuit ---
     if decision.get("kind") == "playbook" and _pb_run is not None:
@@ -189,27 +242,11 @@ def answer(question, backend, path="panel", params=None):
             "slots": slots,
         }
 
-    if decision.get("kind") == "chitchat":
-        return {
-            "kind": "chitchat",
-            "text": (
-                "你好。我可以自动调用 RenderDoc 接口分析当前抓帧。\n"
-                "试试：「分析 GPU 耗时」「当前管线状态」「PS 反汇编」「为什么这个 draw 慢」。"
-            ),
-            "intent": "chitchat",
-            "slots": slots,
-            "errors": [],
-            "explain_with_llm": False,
-            "followups": ["gpu_top_draws", "pipeline_state", "ps_disasm"],
-        }
-
     # --- Rule plan ---
     intent = decision.get("intent") or "general"
-    explain_hint = bool(
-        params.get("explain_with_llm")
-        or router.classify_intent(text, slots) == "why_slow"
-        or ("解释" in text)
-    )
+    # Local-first: only enable Cloud LLM narrative when caller opts in.
+    # Catalog plans keep explain_with_llm=False for speed.
+    explain_hint = bool(params.get("explain_with_llm"))
     plan = planner.build_plan(intent, slots=slots, path=path, explain_hint=explain_hint)
     plan = planner.validate_plan(plan, path=path)
     # Merge caller params into plan params

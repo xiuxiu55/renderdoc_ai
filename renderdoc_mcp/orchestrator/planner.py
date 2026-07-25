@@ -18,9 +18,12 @@ def _apply_slots_to_args(args, slots, tool):
         if tool in (
             "get_pipeline_state", "get_action", "get_event_chunk",
             "get_shader_disassembly", "get_shader_reflection", "set_event",
+            "get_constant_buffer",
         ):
             out["event_id"] = int(eid)
-    if stage and tool in ("get_shader_disassembly", "get_shader_reflection"):
+    if stage and tool in (
+        "get_shader_disassembly", "get_shader_reflection", "get_constant_buffer",
+    ):
         out["stage"] = stage
     name = slots.get("resource_name")
     if name and tool in ("list_textures", "list_resources") and "name_filter" not in out:
