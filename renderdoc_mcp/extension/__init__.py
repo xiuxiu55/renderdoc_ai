@@ -138,6 +138,10 @@ def _copy_to_clipboard(text):
 TOOL_MARKER = "@@RDTOOL@@"
 MAX_TOOL_STEPS = 8
 
+# Temporary: all free-text / analysis questions go to the selected model so we
+# can evaluate model quality. Local orchestrator/playbook short-circuit is off.
+ALWAYS_USE_MODEL = True
+
 # name -> ({argName: "描述"}, "工具说明"). The name must match a LiveFrame method.
 RD_TOOL_SPECS = [
     ("get_current_frame", {},
@@ -190,31 +194,112 @@ def _agent_system_prompt():
     lines += [
         "",
         "意图路由：",
-        "- 耗时/性能/瓶颈 → list_actions(drawcalls_only=true) 然后 "
-        "fetch_counters(counters=[\"EventGPUDuration\"])（不要用 list_resources）",
+        "- 耗时/性能/瓶颈/资源耗时 → list_actions(drawcalls_only=true) 然后 "
+        "fetch_counters(counters=[\"EventGPUDuration\"])（不要用 list_resources 当耗时）",
+        "- 谁写了某 RT/纹理 → get_resource_usage(resource_id=…)；像素历史 → get_pixel_history",
         "- 事件树/drawcall → list_actions",
         "- 某个 EID → get_action；API 参数 → get_event_chunk",
         "- 管线/RT → get_pipeline_state；shader → get_shader_disassembly / get_shader_reflection",
         "- 纹理/资源元数据 → list_textures / list_resources",
+        "- 描述符绑定 → get_descriptor_access",
         "",
-        "需要数据时只输出一行：%s {\"tool\": \"名\", \"args\": {...}}" % TOOL_MARKER,
+        "需要更多数据时只输出一行：%s {\"tool\": \"名\", \"args\": {...}}" % TOOL_MARKER,
         "已有足够信息时直接用中文给出分析（不要再包含 %s）。" % TOOL_MARKER,
     ]
     return "\n".join(lines)
 
 
 def _analysis_prompt(topic, question, data_for_model):
-    """Short tool-free prompt. Avoid role-play / jailbreak-style framing —
-    some models treat that as ``stopReason=refusal``."""
+    """Prompt when evidence is already attached. Still allows @@RDTOOL@@ follow-ups."""
     q = (question or topic or "请分析以下 RenderDoc 采样数据").strip()
     return (
-        "下面是 RenderDoc 扩展从当前已打开抓帧读取的性能/帧数据摘要。\n"
-        "请直接根据这些数据用中文做简洁技术分析（要点列表），"
-        "指出最耗时或最可疑的事件，并给出可执行的优化建议。\n"
-        "不需要访问任何外部工具；数据已完整给出。\n\n"
+        "下面是 RenderDoc 扩展已通过接口采样的数据。\n"
+        "请用中文做简洁技术分析（要点列表），指出最耗时或最可疑之处，并给出可执行建议。\n"
+        "若数据仍不足（例如缺 GPU 耗时），请只输出一行：\n"
+        "%s {\"tool\": \"fetch_counters\", \"args\": {\"counters\": [\"EventGPUDuration\"]}}\n"
+        "不要声称「无法调用接口」——扩展会执行 @@RDTOOL@@。\n\n"
         "问题：%s\n\n"
-        "数据摘要：\n%s" % (q, data_for_model)
+        "已采样数据：\n%s" % (TOOL_MARKER, q, data_for_model)
     )
+
+
+def _agent_first_prompt(question, evidence_text):
+    """Full agent prompt: tool protocol + prefetched API evidence."""
+    return (
+        _agent_system_prompt()
+        + "\n\n---\n"
+        + "用户问题：%s\n\n" % (question or "")
+        + "扩展已预先调用的接口结果（可直接分析；不够再 @@RDTOOL@@）：\n"
+        + (evidence_text or "(尚无预取；请先按意图路由调用工具)")
+    )
+
+
+def _prefetch_evidence(question):
+    """Call LiveFrame tools before the model, so answers are based on real APIs.
+
+    Returns (steps_report_text, evidence_blob).
+    """
+    q = (question or "").strip()
+    ql = q.lower()
+    steps = []
+    parts = []
+
+    def call(tool, args=None):
+        args = args or {}
+        steps.append("%d. %s %s" % (
+            len(steps) + 1, tool,
+            json.dumps(args, ensure_ascii=False) if args else ""))
+        raw = _run_rd_tool(tool, args)
+        parts.append("### %s\n%s" % (tool, _cap_result(raw, 12000)))
+        return raw
+
+    # Always include current-frame overview when a capture is open.
+    if live is not None and live.loaded():
+        call("get_current_frame", {})
+
+    timing = any(k in q or k in ql for k in (
+        "耗时", "性能", "瓶颈", "卡顿", "gpu", "timing", "duration", "fps",
+        "资源耗时", "最慢", "慢", "counter", "计数器",
+    ))
+    pipeline = any(k in q or k in ql for k in (
+        "管线", "pipeline", "pso", "视口", "viewport", "blend", "深度",
+    ))
+    shader = any(k in q or k in ql for k in (
+        "shader", "着色器", "反汇编", "disasm", "hlsl", "spirv", "ps", "vs", "cs",
+    ))
+    texture = any(k in q or k in ql for k in (
+        "纹理", "texture", "rt", "rendertarget", "贴图", "黑屏",
+    ))
+    usage = any(k in q or k in ql for k in (
+        "谁写", "usage", "资源使用", "读写",
+    ))
+
+    # Default for "分析/接口" style questions: treat as timing if ambiguous.
+    if not (timing or pipeline or shader or texture or usage):
+        if any(k in q for k in ("分析", "接口", "renderdoc", "抓帧", "draw")):
+            timing = True
+
+    if timing:
+        call("list_actions", {"drawcalls_only": True})
+        call("fetch_counters", {"counters": ["EventGPUDuration"]})
+    if pipeline and not timing:
+        call("get_pipeline_state", {})
+    if shader:
+        call("get_shader_disassembly", {"stage": "Pixel"})
+    if texture:
+        call("list_textures", {})
+        if not pipeline:
+            call("get_pipeline_state", {})
+    if usage:
+        # Need a resource id from pipeline outputs if possible — skip if unknown.
+        call("get_pipeline_state", {})
+
+    if not parts:
+        parts.append("(无抓帧或无需预取；模型可用 @@RDTOOL@@ 自行取数)")
+
+    steps_text = "【自动调用接口】\n" + ("\n".join(steps) if steps else "(无)")
+    evidence = steps_text + "\n\n" + "\n\n".join(parts)
+    return steps_text, evidence
 
 
 def _summarize_drawcalls_local(actions_raw, top_n=20):
@@ -885,8 +970,29 @@ class Window(qrd.CaptureViewer):
                 reply = None
                 qtext = user_text or label or ""
 
-                # 1) Graphics → local MCP/orchestrator; otherwise → model.
-                if _HAS_ORCH and prebuilt is None:
+                # 1) Model-first: prefetch RenderDoc APIs, then ask the model.
+                if ALWAYS_USE_MODEL and prebuilt is None:
+                    self._ui(lambda: self.mqt.SetWidgetText(
+                        self.history,
+                        self._reply_base + "（正在调用 RenderDoc 接口采样…）"))
+                    steps_text, evidence = _prefetch_evidence(qtext)
+                    evidence = _model_payload_from_local(evidence, 14000)
+                    body = steps_text + "\n\n" + evidence
+                    first_prompt = _agent_first_prompt(qtext, evidence)
+                    reply = self._run_agent_or_local(
+                        first_prompt, token, port, body)
+                    if reply:
+                        # Show which APIs were called before the model answer.
+                        reply = steps_text + "\n\n" + reply
+                    else:
+                        reply = (
+                            steps_text
+                            + "\n\n(模型未返回内容；请确认 sidecar 已连接)\n\n"
+                            + evidence
+                        )
+
+                # 1b) Legacy: graphics → local orchestrator (disabled when ALWAYS_USE_MODEL).
+                elif _HAS_ORCH and prebuilt is None:
                     model_name = ""
                     try:
                         model_name = self.mqt.GetWidgetText(self.modelCombo) or ""
@@ -897,7 +1003,6 @@ class Window(qrd.CaptureViewer):
                     if orch is not None:
                         kind = orch.get("kind")
                         if kind in ("model", "chitchat"):
-                            # Non-graphics (e.g. 「你好」): let the selected model answer.
                             first_prompt = _analysis_prompt(
                                 "自由问答", qtext, qtext)
                             reply = self._run_agent_or_local(
@@ -906,7 +1011,6 @@ class Window(qrd.CaptureViewer):
                                 reply = "(模型未返回内容；请确认 sidecar 已连接)"
                         else:
                             reply = orch.get("text") or ""
-                            # Optional narrative only when plan asks for it.
                             if (orch.get("explain_with_llm")
                                     and kind not in ("gate_fail", "playbook")
                                     and not token.cancelled()):
@@ -931,17 +1035,30 @@ class Window(qrd.CaptureViewer):
                                         + narrative
                                     )
 
-                # 2) Legacy prebuilt path (quick actions that still pass data).
+                # 2) Quick-action prebuilt: still send to model with local data as context.
                 if reply is None and prebuilt is not None:
-                    reply = self._answer_local_first(
-                        label or user_text or "分析",
-                        user_text or label or "",
-                        prebuilt, token, port)
+                    if ALWAYS_USE_MODEL:
+                        body = (
+                            "【RenderDoc 本地采样】\n%s\n\n用户问题：\n%s"
+                            % (prebuilt, qtext)
+                        )
+                        first_prompt = _analysis_prompt(
+                            label or "分析", qtext,
+                            _model_payload_from_local(body, 6000))
+                        reply = self._run_agent_or_local(
+                            first_prompt, token, port, body)
+                        if not reply:
+                            reply = "(模型未返回内容；下方为本地点采样)\n\n" + prebuilt
+                    else:
+                        reply = self._answer_local_first(
+                            label or user_text or "分析",
+                            user_text or label or "",
+                            prebuilt, token, port)
 
                 # 3) Fallback: playbook match / free chat.
                 if reply is None:
                     matched = None
-                    if _HAS_PLAYBOOK:
+                    if (not ALWAYS_USE_MODEL) and _HAS_PLAYBOOK:
                         matched = _pb_match(qtext, path="panel")
                     if matched is not None:
                         reply = _run_playbook_local(matched["id"])

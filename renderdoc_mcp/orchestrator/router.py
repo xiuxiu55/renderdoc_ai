@@ -18,6 +18,11 @@ except ImportError:
         match_question = None
 
 
+# Temporary A/B: force every question to the model (no local playbook/plan).
+# Set False to restore graphics→local MCP / other→model routing.
+FORCE_MODEL_ALL = True
+
+
 _STAGE_MAP = {
     "vs": "Vertex", "vertex": "Vertex", "顶点": "Vertex",
     "hs": "Hull", "hull": "Hull",
@@ -197,10 +202,21 @@ def route(text, path="panel"):
       domain: graphics | other
       question_id?, intent?, slots, confidence
 
-    Rule: graphics-related -> local MCP/playbook; otherwise -> model.
+    Rule: when FORCE_MODEL_ALL, everything -> model.
+    Else: graphics-related -> local MCP/playbook; otherwise -> model.
     """
     t = (text or "").strip()
     slots = extract_slots(t)
+
+    if FORCE_MODEL_ALL:
+        return {
+            "kind": "model",
+            "domain": "other",
+            "question_id": None,
+            "intent": "chitchat" if is_meta_or_chitchat(t) else "general",
+            "slots": slots,
+            "confidence": "high",
+        }
 
     # Non-graphics (incl. "你好" / model identity) -> Cloud/local model.
     if not is_graphics_related(t, slots):
