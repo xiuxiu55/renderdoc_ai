@@ -896,8 +896,8 @@ class Window(qrd.CaptureViewer):
                         qtext, params={"model_name": model_name})
                     if orch is not None:
                         kind = orch.get("kind")
-                        if kind == "model":
-                            # Non-graphics: let the selected model answer.
+                        if kind in ("model", "chitchat"):
+                            # Non-graphics (e.g. 「你好」): let the selected model answer.
                             first_prompt = _analysis_prompt(
                                 "自由问答", qtext, qtext)
                             reply = self._run_agent_or_local(

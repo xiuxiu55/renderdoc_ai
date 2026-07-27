@@ -179,7 +179,9 @@ def answer(question, backend, path="panel", params=None):
     if params.get("event_id") is not None:
         slots["event_id"] = int(params["event_id"])
 
-    if decision.get("kind") == "model":
+    if decision.get("kind") in ("model", "chitchat"):
+        # Non-graphics (greetings, identity, general chat) → panel/MCP client
+        # should call the selected LLM. No local canned text.
         return {
             "kind": "model",
             "domain": "other",

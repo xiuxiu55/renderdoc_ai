@@ -1,4 +1,4 @@
-"""Intent router: playbook match -> catalog keyword score -> intent class.
+"""Intent router: graphics domain -> local MCP; otherwise -> model.
 
 Python 3.6 compatible.
 """
@@ -27,20 +27,39 @@ _STAGE_MAP = {
     "cs": "Compute", "compute": "Compute", "计算": "Compute",
 }
 
-# Identity / help — never run capture tools or Cloud LLM.
+# Greetings / identity: NOT graphics — must go to the model.
 _META_RE = re.compile(
     r"(?:"
     r"你是什么模型|你的模型|模型名称|模型名字|哪个模型|什么模型|"
-    r"你是谁|你叫什么|你会什么|你能做什么|怎么用(?:你|这个|面板|助手)?|"
+    r"你是谁|你叫什么|你会什么|你能做什么|"
     r"who\s+are\s+you|what\s+model|model\s*name|"
     r"^(?:帮助|help|你好|您好|hello|hi|hey|谢谢|thanks|再见|bye|ok|好的)[\s!！。.?？]*$"
     r")",
     re.I,
 )
 
+# Broad graphics / RenderDoc / GPU domain signals.
+_GRAPHICS_RE = re.compile(
+    r"(?:"
+    r"renderdoc|rdc|抓帧|回放|replay|"
+    r"gpu|vulkan|d3d11|d3d12|directx|opengl|gles|metal|dxgi|"
+    r"drawcall|draw\s*call|dispatch|eid|event\s*id|event\s*browser|"
+    r"shader|着色器|hlsl|spirv|glsl|反汇编|disasm|pso|管线|pipeline|"
+    r"texture|纹理|rendertarget|render\s*target|\brt\b|贴图|"
+    r"buffer|缓冲|cbuffer|ubo|mesh|网格|顶点|片元|像素|"
+    r"耗时|性能|瓶颈|卡顿|fps|timing|duration|counter|计数器|"
+    r"黑屏|barrier|fence|stall|同步|"
+    r"viewport|视口|blend|混合|depth|深度|stencil|"
+    r"pass|framebuffer|swapchain|present|"
+    r"当前帧|这一帧|本帧|图形|渲染|图形学|"
+    r"pixel\s*history|minmax|descriptor|描述符|usage"
+    r")",
+    re.I,
+)
+
 
 def is_meta_or_chitchat(text):
-    """True for greetings / model-identity / help — local canned reply only."""
+    """True for greetings / model-identity (non-graphics → model)."""
     t = (text or "").strip()
     if not t:
         return False
@@ -48,6 +67,37 @@ def is_meta_or_chitchat(text):
         return True
     if len(t) <= 16 and re.search(r"你好|您好|hello|hi|thanks|谢谢", t, re.I):
         return True
+    return False
+
+
+def is_graphics_related(text, slots=None):
+    """True when the question should use local RenderDoc MCP / playbook."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Explicit non-graphics: greetings / "what model are you"
+    if is_meta_or_chitchat(t):
+        return False
+
+    slots = slots or extract_slots(t)
+    if slots.get("event_id") is not None:
+        return True
+    if slots.get("stage"):
+        return True
+    if slots.get("resource_name"):
+        return True
+
+    if _GRAPHICS_RE.search(t):
+        return True
+
+    # Any catalog intent hit (except chitchat/general) => graphics.
+    if _score_intents(t):
+        return True
+
+    if re.search(r"为什么|为何|why", t, re.I) and re.search(
+            r"慢|卡|draw|pass|帧", t, re.I):
+        return True
+
     return False
 
 
@@ -142,19 +192,25 @@ def classify_intent(text, slots=None):
 def route(text, path="panel"):
     """Return routing decision dict.
 
-    Keys: kind (playbook|plan|chitchat), question_id?, intent?, slots, confidence
+    Keys:
+      kind: playbook | plan | model
+      domain: graphics | other
+      question_id?, intent?, slots, confidence
+
+    Rule: graphics-related -> local MCP/playbook; otherwise -> model.
     """
     t = (text or "").strip()
     slots = extract_slots(t)
 
-    # Meta / identity first — never playbook or capture tools.
-    if is_meta_or_chitchat(t):
+    # Non-graphics (incl. "你好" / model identity) -> Cloud/local model.
+    if not is_graphics_related(t, slots):
         return {
-            "kind": "chitchat",
+            "kind": "model",
+            "domain": "other",
             "question_id": None,
-            "intent": "chitchat",
+            "intent": "chitchat" if is_meta_or_chitchat(t) else "general",
             "slots": slots,
-            "confidence": "high",
+            "confidence": "high" if is_meta_or_chitchat(t) else "medium",
         }
 
     if match_question is not None:
@@ -162,6 +218,7 @@ def route(text, path="panel"):
         if q is not None:
             return {
                 "kind": "playbook",
+                "domain": "graphics",
                 "question_id": q["id"],
                 "title": q.get("title"),
                 "intent": None,
@@ -170,15 +227,6 @@ def route(text, path="panel"):
             }
 
     intent = classify_intent(t, slots)
-    if intent == "chitchat":
-        return {
-            "kind": "chitchat",
-            "question_id": None,
-            "intent": intent,
-            "slots": slots,
-            "confidence": "high",
-        }
-
     scored = _score_intents(t)
     conf = "low"
     if intent == "why_slow":
@@ -195,6 +243,7 @@ def route(text, path="panel"):
 
     return {
         "kind": "plan",
+        "domain": "graphics",
         "question_id": None,
         "intent": intent,
         "slots": slots,
