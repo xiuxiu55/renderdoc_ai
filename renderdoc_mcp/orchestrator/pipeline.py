@@ -6,7 +6,6 @@ Python 3.6 compatible.
 from __future__ import print_function
 
 import json
-import re
 
 from . import executor
 from . import planner
@@ -71,40 +70,6 @@ def _session_gate(backend, path="panel"):
             return False, "请先打开抓帧（.rdc）再提问。详情: %s" % last_err, info
     return True, "", info
 
-
-def _chitchat_text(question, params=None):
-    """Local canned reply for greetings / model identity — no tools, no LLM."""
-    params = params or {}
-    model = (params.get("model_name") or "").strip()
-    q = question or ""
-    about_model = bool(re.search(
-        r"模型|model|你是谁|你叫什么|who are you", q, re.I))
-
-    lines = []
-    if about_model:
-        lines.append("【本地说明】本回答不经过大模型。")
-        lines.append("")
-        lines.append(
-            "抓帧分析由面板内本地 orchestrator / playbook 完成："
-            "按问题匹配意图 → 调用 RenderDoc 接口 → 生成本地报告。"
-        )
-        if model:
-            lines.append(
-                "面板下拉当前选中的后端模型名：%s"
-                "（仅在显式开启「模型解读」时才会用到；默认分析不用它）。" % model
-            )
-        else:
-            lines.append(
-                "面板可连接 Cursor sidecar 选择模型，但默认分析路径不调用该模型。"
-            )
-        lines.append("")
-        lines.append(
-            "试试：「分析 GPU 耗时」「当前管线状态」「PS 反汇编」「为什么这个 draw 慢」。"
-        )
-    else:
-        lines.append("你好。我可以自动调用 RenderDoc 接口分析当前抓帧（本地工具，不经模型）。")
-        lines.append("试试：「分析 GPU 耗时」「当前管线状态」「PS 反汇编」「为什么这个 draw 慢」。")
-    return "\n".join(lines)
 
 
 def format_report(result):

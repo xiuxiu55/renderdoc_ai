@@ -54,8 +54,7 @@
     {
       "id": "get_capture_info",
       "paths": [
-        "mcp",
-        "panel"
+        "mcp"
       ],
       "category": "session",
       "native": [

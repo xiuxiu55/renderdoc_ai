@@ -38,21 +38,14 @@ try:
         CallableBackend,
         format_result as _pb_format,
         list_questions as _pb_list,
-        match_question as _pb_match,
         run_question as _pb_run,
     )
     _HAS_PLAYBOOK = True
 except Exception:  # noqa: BLE001
     _HAS_PLAYBOOK = False
     CallableBackend = None  # type: ignore
-    _pb_format = _pb_list = _pb_match = _pb_run = None  # type: ignore
+    _pb_format = _pb_list = _pb_run = None  # type: ignore
 
-try:
-    from orchestrator import answer as _orch_answer  # type: ignore
-    _HAS_ORCH = True
-except Exception:  # noqa: BLE001
-    _HAS_ORCH = False
-    _orch_answer = None  # type: ignore
 
 extiface_version = ""
 
@@ -138,8 +131,8 @@ def _copy_to_clipboard(text):
 TOOL_MARKER = "@@RDTOOL@@"
 MAX_TOOL_STEPS = 8
 
-# Temporary: all free-text / analysis questions go to the selected model so we
-# can evaluate model quality. Local orchestrator/playbook short-circuit is off.
+# Free-text chat: prefetch RenderDoc APIs then ask the selected model.
+# Hot-question buttons still use local playbook.
 ALWAYS_USE_MODEL = True
 
 # name -> ({argName: "描述"}, "工具说明"). The name must match a LiveFrame method.
@@ -234,8 +227,11 @@ def _agent_first_prompt(question, evidence_text):
     )
 
 
-def _prefetch_evidence(question):
+def _prefetch_evidence(question, on_progress=None):
     """Call LiveFrame tools before the model, so answers are based on real APIs.
+
+    ``on_progress(status_text)`` is called before/after each tool so the UI can
+    show which interface is running.
 
     Returns (steps_report_text, evidence_blob).
     """
@@ -244,12 +240,42 @@ def _prefetch_evidence(question):
     steps = []
     parts = []
 
+    def _notify(msg):
+        if on_progress is not None:
+            try:
+                on_progress(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
     def call(tool, args=None):
         args = args or {}
-        steps.append("%d. %s %s" % (
-            len(steps) + 1, tool,
-            json.dumps(args, ensure_ascii=False) if args else ""))
+        n = len(steps) + 1
+        arg_s = json.dumps(args, ensure_ascii=False) if args else ""
+        line = "%d. %s %s" % (n, tool, arg_s)
+        _notify(
+            "【自动调用接口】\n"
+            + ("\n".join(steps) + ("\n" if steps else ""))
+            + "→ 正在调用：%s %s …" % (tool, arg_s)
+        )
+        steps.append(line)
         raw = _run_rd_tool(tool, args)
+        # Compact ok/fail for the live list
+        ok = True
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict) and parsed.get("error"):
+                ok = False
+                line = line + " → FAIL"
+                steps[-1] = line
+        except Exception:  # noqa: BLE001
+            pass
+        if ok and not line.endswith("FAIL"):
+            steps[-1] = line + " → ok"
+        _notify(
+            "【自动调用接口】\n"
+            + "\n".join(steps)
+            + "\n（采样中…）"
+        )
         parts.append("### %s\n%s" % (tool, _cap_result(raw, 12000)))
         return raw
 
@@ -296,57 +322,13 @@ def _prefetch_evidence(question):
 
     if not parts:
         parts.append("(无抓帧或无需预取；模型可用 @@RDTOOL@@ 自行取数)")
+        _notify("【自动调用接口】\n(无需预取或未加载抓帧)")
 
     steps_text = "【自动调用接口】\n" + ("\n".join(steps) if steps else "(无)")
     evidence = steps_text + "\n\n" + "\n\n".join(parts)
+    _notify(steps_text + "\n\n（接口采样完成，正在请求模型解读…）")
     return steps_text, evidence
 
-
-def _summarize_drawcalls_local(actions_raw, top_n=20):
-    """Build a compact local drawcall summary when the model refuses."""
-    try:
-        actions = json.loads(actions_raw)
-    except ValueError:
-        return "drawcall 原始数据：\n" + _cap_result(actions_raw, 8000)
-
-    flat = []
-
-    def walk(nodes):
-        if not isinstance(nodes, list):
-            return
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            eid = n.get("eventId", n.get("event_id"))
-            name = n.get("name") or ""
-            indices = n.get("numIndices")
-            instances = n.get("numInstances")
-            if eid is not None:
-                score = 0
-                try:
-                    score = int(indices or 0) * max(int(instances or 1), 1)
-                except Exception:  # noqa: BLE001
-                    score = 0
-                flat.append((score, int(eid), name, indices, instances))
-            walk(n.get("children") or [])
-
-    if isinstance(actions, list):
-        walk(actions)
-
-    flat.sort(reverse=True)
-    lines = [
-        "【本地 Drawcall 摘要】",
-        "draw/dispatch 数量: %d" % len(flat),
-        "按 numIndices*numInstances 估算较重的 Top %d（非真实 GPU 耗时；真实耗时请用「GPU 耗时」）：" % top_n,
-    ]
-    if not flat:
-        lines.append("(未解析到 drawcall)")
-    else:
-        for i, (score, eid, name, indices, instances) in enumerate(flat[:top_n], 1):
-            lines.append(
-                "%2d. EID %-6d  idx=%s  inst=%s  score=%s  %s" % (
-                    i, eid, indices, instances, score, name))
-    return "\n".join(lines)
 
 
 def _model_payload_from_local(local_data, limit=3500):
@@ -460,20 +442,6 @@ def _tool_result_prompt(name, result):
             "否则用中文给出最终分析结论。" % (name, _cap_result(result), TOOL_MARKER))
 
 
-# Keywords that mean the user wants Event Browser / GPU timing analysis.
-_TIMING_KEYWORDS = (
-    "耗时", "耗時", "性能", "瓶颈", "瓶頸", "卡顿", "卡頓", "慢",
-    "timing", "duration", "gpuduration", "gpu duration", "perf",
-    "event browser", "eventbrowser", "计数器", "計數器", "counter",
-)
-
-
-def _is_timing_query(text):
-    t = (text or "").lower()
-    if not t:
-        return False
-    return any(k in t for k in _TIMING_KEYWORDS)
-
 
 def _looks_like_refusal(text):
     """True only for hard refusals — not for normal disclaimers.
@@ -542,20 +510,6 @@ def _run_playbook_local(question_id, params=None):
     result = _pb_run(question_id, backend, params=params)
     return _pb_format(result)
 
-
-def _run_orchestrator_local(user_text, params=None):
-    """Intent→plan→execute via shared orchestrator (local tools first)."""
-    if not _HAS_ORCH or _orch_answer is None or CallableBackend is None:
-        return None
-    backend = CallableBackend(lambda tool, args: _run_rd_tool(tool, args))
-    return _orch_answer(user_text, backend, path="panel", params=params or {})
-
-
-def _gather_timing_bundle(top_n=30):
-    """Prefetch GPU timing via playbook (local, model-free)."""
-    if _HAS_PLAYBOOK:
-        return _run_playbook_local("gpu_top_draws", params={"top_n": top_n})
-    return "Playbook 未安装，无法采样 GPU 耗时。请运行 extension/install.py。"
 
 
 class Window(qrd.CaptureViewer):
@@ -735,9 +689,6 @@ class Window(qrd.CaptureViewer):
         except Exception:  # noqa: BLE001
             pass
 
-    def _show_local_report(self, label, report):
-        self.history_text += "🧑 你：\n%s\n\n🤖 本地分析：\n%s\n\n" % (label, report)
-        self.mqt.SetWidgetText(self.history, self.history_text)
 
     def _qa_playbook(self, question_id, label=None):
         if self.busy:
@@ -972,10 +923,14 @@ class Window(qrd.CaptureViewer):
 
                 # 1) Model-first: prefetch RenderDoc APIs, then ask the model.
                 if ALWAYS_USE_MODEL and prebuilt is None:
-                    self._ui(lambda: self.mqt.SetWidgetText(
-                        self.history,
-                        self._reply_base + "（正在调用 RenderDoc 接口采样…）"))
-                    steps_text, evidence = _prefetch_evidence(qtext)
+                    def _show_prefetch(msg):
+                        text = self._reply_base + (msg or "")
+                        self._ui(lambda t=text: self.mqt.SetWidgetText(
+                            self.history, t))
+
+                    _show_prefetch("【自动调用接口】\n（准备采样…）")
+                    steps_text, evidence = _prefetch_evidence(
+                        qtext, on_progress=_show_prefetch)
                     evidence = _model_payload_from_local(evidence, 14000)
                     body = steps_text + "\n\n" + evidence
                     first_prompt = _agent_first_prompt(qtext, evidence)
@@ -991,89 +946,42 @@ class Window(qrd.CaptureViewer):
                             + evidence
                         )
 
-                # 1b) Legacy: graphics → local orchestrator (disabled when ALWAYS_USE_MODEL).
-                elif _HAS_ORCH and prebuilt is None:
-                    model_name = ""
-                    try:
-                        model_name = self.mqt.GetWidgetText(self.modelCombo) or ""
-                    except Exception:  # noqa: BLE001
-                        model_name = ""
-                    orch = _run_orchestrator_local(
-                        qtext, params={"model_name": model_name})
-                    if orch is not None:
-                        kind = orch.get("kind")
-                        if kind in ("model", "chitchat"):
-                            first_prompt = _analysis_prompt(
-                                "自由问答", qtext, qtext)
-                            reply = self._run_agent_or_local(
-                                first_prompt, token, port, qtext)
-                            if not reply:
-                                reply = "(模型未返回内容；请确认 sidecar 已连接)"
-                        else:
-                            reply = orch.get("text") or ""
-                            if (orch.get("explain_with_llm")
-                                    and kind not in ("gate_fail", "playbook")
-                                    and not token.cancelled()):
-                                evidence = _model_payload_from_local(reply, 6000)
-                                prompt = _analysis_prompt(
-                                    "基于证据解读",
-                                    qtext,
-                                    evidence
-                                    + "\n\n请只用以上证据解释原因与优化建议，"
-                                    "不要编造未出现的数据。",
-                                )
-                                try:
-                                    narrative = self._run_agent_or_local(
-                                        prompt, token, port, evidence)
-                                except Exception as exc:  # noqa: BLE001
-                                    narrative = "(模型解读失败: %s)" % exc
-                                if narrative and not _looks_like_refusal(
-                                        narrative):
-                                    reply = (
-                                        reply
-                                        + "\n\n【模型解读】\n"
-                                        + narrative
-                                    )
 
                 # 2) Quick-action prebuilt: still send to model with local data as context.
                 if reply is None and prebuilt is not None:
-                    if ALWAYS_USE_MODEL:
-                        body = (
-                            "【RenderDoc 本地采样】\n%s\n\n用户问题：\n%s"
-                            % (prebuilt, qtext)
+                    body = (
+                        "【RenderDoc 本地采样】\n%s\n\n用户问题：\n%s"
+                        % (prebuilt, qtext)
+                    )
+                    first_prompt = _analysis_prompt(
+                        label or "分析", qtext,
+                        _model_payload_from_local(body, 6000))
+                    reply = self._run_agent_or_local(
+                        first_prompt, token, port, body)
+                    if not reply:
+                        reply = (
+                            "(模型未返回内容；下方为本地点采样)\n\n" + prebuilt
                         )
-                        first_prompt = _analysis_prompt(
-                            label or "分析", qtext,
-                            _model_payload_from_local(body, 6000))
-                        reply = self._run_agent_or_local(
-                            first_prompt, token, port, body)
-                        if not reply:
-                            reply = "(模型未返回内容；下方为本地点采样)\n\n" + prebuilt
-                    else:
-                        reply = self._answer_local_first(
-                            label or user_text or "分析",
-                            user_text or label or "",
-                            prebuilt, token, port)
 
-                # 3) Fallback: playbook match / free chat.
+                # 3) Fallback free chat (optional frame context).
                 if reply is None:
-                    matched = None
-                    if (not ALWAYS_USE_MODEL) and _HAS_PLAYBOOK:
-                        matched = _pb_match(qtext, path="panel")
-                    if matched is not None:
-                        reply = _run_playbook_local(matched["id"])
+                    if attach_context:
+                        body = (
+                            self._frame_context()
+                            + "\n\n用户问题：\n"
+                            + user_text
+                        )
                     else:
-                        if attach_context:
-                            body = self._frame_context() + "\n\n用户问题：\n" + user_text
-                        else:
-                            body = user_text
-                        first_prompt = _analysis_prompt(
-                            "自由问答", user_text,
-                            _model_payload_from_local(body, 3500))
-                        reply = self._run_agent_or_local(
-                            first_prompt, token, port, body)
-                        if not reply:
-                            reply = "(没有返回文本内容；可先试热门问题或检查抓帧是否已打开)"
+                        body = user_text
+                    first_prompt = _analysis_prompt(
+                        "自由问答", user_text,
+                        _model_payload_from_local(body, 3500))
+                    reply = self._run_agent_or_local(
+                        first_prompt, token, port, body)
+                    if not reply:
+                        reply = (
+                            "(没有返回文本内容；可先试热门问题或检查抓帧是否已打开)"
+                        )
 
                 def finish():
                     self.history_text = self._reply_base + reply + "\n\n"
@@ -1096,91 +1004,6 @@ class Window(qrd.CaptureViewer):
 
         _spawn(worker)
 
-    def _answer_timing(self, question, token, port, prebuilt=None):
-        self._ui(lambda: self.mqt.SetWidgetText(
-            self.history, self._reply_base + "（正在从 RenderDoc 采样 GPU 耗时…）"))
-        if prebuilt and "【本地解读】" in (prebuilt or ""):
-            return prebuilt
-        try:
-            return _gather_timing_bundle()
-        except Exception as exc:  # noqa: BLE001
-            return "采样失败：%s" % exc
-
-    def _answer_local_first(self, topic, question, local_data, token, port):
-        """Show local RenderDoc data first; ask CodeBuddy only for a short gloss.
-
-        If ACP returns ``refusal`` (common with some models), the local block
-        (including 【本地解读】) remains usable so the user is never stuck.
-        """
-        local_block = (
-            "【RenderDoc 本地结果 — 不依赖 CodeBuddy】\n"
-            "%s\n\n"
-            "---\n" % local_data
-        )
-        self._ui(lambda: self.mqt.SetWidgetText(
-            self.history, self._reply_base + local_block + "（正在请求 CodeBuddy 解读…）"))
-
-        # Compact summary only — never the raw counter JSON dump.
-        prompt = _analysis_prompt(
-            topic, question, _model_payload_from_local(local_data, 3500))
-        answer = self._ask_codebuddy_once(prompt, token, port, prefix=local_block)
-
-        if token is not None and token.cancelled():
-            return (local_block + "（已取消）").strip()
-
-        if answer is None:
-            # One reconnect retry — idle ACP sessions sometimes refuse oddly.
-            try:
-                if self.acp is not None:
-                    self.acp.reopen()
-                    answer = self._ask_codebuddy_once(
-                        prompt, token, port, prefix=local_block)
-            except Exception:  # noqa: BLE001
-                answer = None
-
-        if not answer:
-            # Soften the failure line: local Top-N + 本地解读 already answer the question.
-            hint = (
-                "【CodeBuddy】模型未返回可用解读"
-                "（ACP refusal 或空回复）。上面的本地 Top-N / 本地解读可直接使用；"
-                "也可换模型后重试。\n"
-            )
-            return (local_block + hint).strip()
-
-        return (local_block + "【CodeBuddy 解读】\n" + answer).strip()
-
-    def _ask_codebuddy_once(self, prompt, token, port, prefix=""):
-        """One ACP turn. Returns answer text, or None on hard refusal/empty.
-
-        Prefer the raw agent answer text. Do not treat normal disclaimers
-        ("无法直接访问…但根据数据…") as refusal.
-        """
-        try:
-            raw, rendered = self._one_turn(prompt, token, port, prefix)
-        except Exception:  # noqa: BLE001
-            return None
-
-        answer = (raw or "").strip()
-        # If the model produced real answer text, ignore disclaimer heuristics
-        # on the rendered transcript (which may embed our own refusal notes).
-        if answer:
-            if _is_acp_refusal(self.acp) and _looks_like_refusal(answer):
-                return None
-            if answer.startswith("CodeBuddy 拒绝"):
-                return None
-            if _looks_like_refusal(answer) and len(answer) < 80:
-                return None
-            return answer
-
-        # Empty raw answer: fall back to rendered, then apply stricter checks.
-        answer = (rendered or "").strip()
-        if not answer:
-            return None
-        if _is_acp_refusal(self.acp) or _looks_like_refusal(answer):
-            return None
-        if "拒绝了该请求" in answer and "refusal" in answer.lower():
-            return None
-        return answer
 
     def _run_agent_or_local(self, first_prompt, token, port, local_fallback=""):
         reply = self._run_agent(first_prompt, token, port)
@@ -1261,18 +1084,6 @@ class Window(qrd.CaptureViewer):
 
     # -- quick actions ----------------------------------------------------
 
-    def _qa_generic(self, label, instruction, gather):
-        if self.busy:
-            return
-
-        def worker():
-            try:
-                data = gather()
-            except Exception as exc:  # noqa: BLE001
-                data = "(获取数据失败: %s)" % exc
-            prompt = "%s\n\n以下是 RenderDoc 当前帧的相关数据：\n%s" % (instruction, data)
-            self._ui(lambda: self._send(instruction, prebuilt=prompt, label=label))
-        _spawn(worker)
 
     def _qa_analyze_frame(self):
         self._qa_playbook("current_frame", label="分析当前帧")
